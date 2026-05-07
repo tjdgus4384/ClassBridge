@@ -8,7 +8,7 @@ node_modules/
 out/
 
 # Production build
-build/
+/build/
 dist/
 dist-electron/
 electron/node_modules/
@@ -18,6 +18,10 @@ electron/dist/
 *.AppImage
 *.zip
 *.snap
+
+# 단, electron/build/ 안의 빌드 자원(아이콘 등)은 포함
+!electron/build/
+!electron/build/**
 
 # Environment variables
 .env

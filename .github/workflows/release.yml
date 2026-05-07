@@ -37,6 +37,19 @@ jobs:
         working-directory: electron
         run: npm install
 
+      # electron/ 에는 .git 이 없어 electron-builder가 repo를 못 찾음. 동적으로 주입.
+      - name: Inject repository field into electron/package.json
+        working-directory: electron
+        shell: bash
+        run: |
+          node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            p.repository = { type: 'git', url: 'https://github.com/${{ github.repository }}.git' };
+            fs.writeFileSync('package.json', JSON.stringify(p, null, 2));
+          "
+          cat package.json | grep -A2 repository
+
       - name: Build (electron-builder publish to GitHub)
         working-directory: electron
         env:
