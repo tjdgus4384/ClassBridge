@@ -1,0 +1,55 @@
+name: Build & Release Desktop App
+
+on:
+  push:
+    tags:
+      - 'v*'   # v0.1.0 같은 태그를 push하면 트리거
+  workflow_dispatch:   # 수동 실행도 허용
+
+permissions:
+  contents: write   # Release 생성 및 업로드 권한
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact: 'dist-electron/*.dmg'
+            name: macos
+          - os: windows-latest
+            artifact: 'dist-electron/*.exe'
+            name: windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install electron deps
+        working-directory: electron
+        run: npm install
+
+      - name: Build (electron-builder publish to GitHub)
+        working-directory: electron
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS 베타 — 코드사이닝 미사용
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --publish always
+
+      - name: Upload artifacts (debug)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: electron-${{ matrix.name }}
+          path: dist-electron/*
+          if-no-files-found: warn
+          retention-days: 7

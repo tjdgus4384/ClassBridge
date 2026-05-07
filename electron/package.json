@@ -1,0 +1,64 @@
+{
+  "name": "classbridge-desktop",
+  "version": "0.1.0",
+  "description": "ClassBridge 교수자 위젯",
+  "author": "ClassBridge",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "CLASSBRIDGE_URL=http://localhost:3000 electron .",
+    "dev:win": "set CLASSBRIDGE_URL=http://localhost:3000 && electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:all": "electron-builder -mw"
+  },
+  "build": {
+    "appId": "com.classbridge.desktop",
+    "productName": "ClassBridge",
+    "directories": {
+      "output": "../dist-electron",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.education",
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] }
+      ],
+      "icon": "build/icon.png",
+      "identity": null,
+      "type": "distribution"
+    },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "releaseType": "release"
+      }
+    ]
+  },
+  "dependencies": {
+    "wait-port": "^1.1.0"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  }
+}
