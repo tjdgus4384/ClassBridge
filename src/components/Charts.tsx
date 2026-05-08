@@ -49,8 +49,6 @@ export function SessionFlowChart({ data }: { data: Snapshot[] }) {
     () => Math.max(0, ...series.map(s => s.green + s.yellow + s.red)),
     [series]
   )
-  const peakStuck = useMemo(() => Math.max(0, ...series.map(s => s.yellow + s.red)), [series])
-  const peakRed = useMemo(() => Math.max(0, ...series.map(s => s.red)), [series])
 
   if (series.length < 2) return <ChartEmpty />
 
@@ -95,14 +93,8 @@ export function SessionFlowChart({ data }: { data: Snapshot[] }) {
     <div>
       <div className="flex items-baseline justify-between mb-3 flex-wrap gap-x-4 gap-y-1">
         <div className="text-white/80 text-sm font-semibold tracking-tight">수업 흐름</div>
-        <div className="text-white/50 text-xs space-x-3 tabular-nums">
-          <span>최대 <span className="text-white font-semibold">{peakStudent}</span>명</span>
-          {peakStuck > 0 && (
-            <span>
-              막힘 <span className="text-rose-400 font-semibold">{peakStuck}</span>명
-              {peakRed > 0 && <span className="text-rose-400/60"> (🔴 {peakRed})</span>}
-            </span>
-          )}
+        <div className="text-white/50 text-xs tabular-nums">
+          최대 <span className="text-white font-semibold">{peakStudent}</span>명
         </div>
       </div>
 

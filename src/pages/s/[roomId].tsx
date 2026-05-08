@@ -224,6 +224,7 @@ export default function StudentRemote() {
       joinError === 'room_not_found' ? '존재하지 않는 강의입니다. 코드를 다시 확인해 주세요.' :
       joinError === 'invalid_room_id' ? '잘못된 강의 코드입니다.' :
       joinError === 'invalid_student_id' ? '디바이스 ID가 만들어지지 않았습니다. 페이지를 새로고침해 주세요.' :
+      joinError === 'session_full' ? '강의 정원이 가득 찼습니다 (최대 500명).' :
       '입장에 실패했습니다.'
     return (
       <>
@@ -242,8 +243,9 @@ export default function StudentRemote() {
     )
   }
 
-  // ── 대기실 화면 ─────────────────────────────────────────────────────────
-  if (phase === 'waiting') {
+  // ── 대기실 / 연결 중 화면 ──────────────────────────────────────────────
+  // connecting 상태에서 라이브 메인이 잠깐 깜빡이지 않도록 같은 화면으로 처리.
+  if (phase === 'waiting' || phase === 'connecting') {
     return (
       <>
         <Head>

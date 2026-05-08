@@ -1,6 +1,6 @@
 {
   "name": "classbridge-desktop",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "ClassBridge 교수자 위젯",
   "author": "ClassBridge",
   "main": "main.js",

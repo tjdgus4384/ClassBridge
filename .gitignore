@@ -44,3 +44,7 @@ yarn-error.log*
 .idea/
 *.swp
 *.swo
+
+# Backup / TS build cache
+*.bak
+tsconfig.tsbuildinfo

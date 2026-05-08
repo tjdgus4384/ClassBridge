@@ -74,6 +74,7 @@ export default function ProfessorDashboard() {
   const [questionsOpen, setQuestionsOpen] = useState(false)
   const [newQuestionPulse, setNewQuestionPulse] = useState(false)
   const [archived, setArchived] = useState<ArchivedSession[]>([])
+  const [bootstrapped, setBootstrapped] = useState(false) // 첫 room-state 도착 여부
   const [historyOpen, setHistoryOpen] = useState(true) // 검토 모드에선 기본 펼침
   const [openSessionId, setOpenSessionId] = useState<string | null>(null)
   const isWidget = widget === '1' || isElectron
@@ -141,6 +142,7 @@ export default function ProfessorDashboard() {
       if (typeof data.isLive === 'boolean') setIsLive(data.isLive)
       if (typeof data.name !== 'undefined') setCourseName(data.name)
       if (Array.isArray(data.archivedSessions)) setArchived(data.archivedSessions)
+      setBootstrapped(true)
     }
 
     const onCourseRenamed = ({ name }: { name: string | null }) => setCourseName(name)
@@ -307,6 +309,22 @@ export default function ProfessorDashboard() {
               랜딩으로 돌아가기
             </button>
           )}
+        </div>
+      </>
+    )
+  }
+
+  // ── 첫 room-state 받기 전 — 검토/라이브 깜빡임 방지 로딩 화면 ──────────
+  if (!bootstrapped) {
+    return (
+      <>
+        <Head><title>ClassBridge</title></Head>
+        <div className={`min-h-screen text-white flex items-center justify-center ${isWidget ? 'bg-black/90 backdrop-blur-xl' : 'bg-[#0d0d0d]'}`}
+             style={isWidget ? { borderRadius: 16, overflow: 'hidden' } : {}}>
+          <div className="flex items-center gap-2.5 text-white/50 text-sm">
+            <div className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+            <span>연결 중...</span>
+          </div>
         </div>
       </>
     )

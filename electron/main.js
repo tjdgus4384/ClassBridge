@@ -45,13 +45,16 @@ function createLandingWindow() {
     resizable: false,
     titleBarStyle: 'hiddenInset',
     backgroundColor: '#0a0a0a',
+    show: false,                // 콘텐츠 준비될 때까지 숨김 → 깜빡임 제거
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,           // Chromium sandbox 안에서 renderer 실행
     },
   })
   mainWindow.loadURL(SERVER_URL)
+  mainWindow.once('ready-to-show', () => mainWindow.show())
   mainWindow.on('closed', () => { mainWindow = null })
 }
 
@@ -74,10 +77,12 @@ function createWidgetWindow(roomId, ownerToken) {
     minimizable: false,
     maximizable: false,
     skipTaskbar: false,
+    show: false,                // 콘텐츠 준비될 때까지 숨김
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,           // Chromium sandbox 안에서 renderer 실행
     },
   })
 
@@ -85,6 +90,7 @@ function createWidgetWindow(roomId, ownerToken) {
 
   const hash = ownerToken ? `#t=${encodeURIComponent(ownerToken)}` : ''
   widgetWindow.loadURL(`${SERVER_URL}/p/${roomId}?widget=1${hash}`)
+  widgetWindow.once('ready-to-show', () => widgetWindow && widgetWindow.show())
 
   // 닫히기 직전 — 세션 종료 신호 emit 후 destroy
   widgetWindow.on('close', (e) => {
@@ -121,18 +127,31 @@ ipcMain.on('close-widget', () => {
   if (widgetWindow && !widgetWindow.isDestroyed()) widgetWindow.close()
 })
 
-// 미니 모드 고정 크기
+// 미니/풀 모드 고정 크기
 const MINI_W = 288
 const MINI_H = 52
+const FULL_W = 460
+const FULL_H = 720
 
 ipcMain.on('toggle-compact', (_, { compact }) => {
-  if (!widgetWindow) return
+  if (!widgetWindow || widgetWindow.isDestroyed()) return
   if (compact) {
+    // 순서 중요: 일부 Windows 환경에서 setResizable(false)가 먼저면 setSize가 무시됨.
+    // 1) 일단 resizable=true로 풀어놓고
+    widgetWindow.setResizable(true)
+    // 2) min/max를 미니로 강제
+    widgetWindow.setMinimumSize(MINI_W, MINI_H)
+    widgetWindow.setMaximumSize(MINI_W, MINI_H)
+    // 3) 사이즈 변경 (animate 인자는 macOS 한정이라 생략)
+    widgetWindow.setSize(MINI_W, MINI_H)
+    // 4) 마지막에 resizable 잠금
     widgetWindow.setResizable(false)
-    widgetWindow.setSize(MINI_W, MINI_H, true)
   } else {
     widgetWindow.setResizable(true)
-    widgetWindow.setSize(460, 720, true)
+    // min/max 풀기 (0,0 → 무제한)
+    widgetWindow.setMinimumSize(0, 0)
+    widgetWindow.setMaximumSize(0, 0)
+    widgetWindow.setSize(FULL_W, FULL_H)
   }
 })
 
