@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { useRouter } from 'next/router'
 import Head from 'next/head'
 import { getSocket } from '@/lib/socket'
-import { StudentCountChart, ReactionTimelineChart, Snapshot } from '@/components/Charts'
+import { SessionFlowChart, Snapshot } from '@/components/Charts'
 
 interface Question {
   id: string
@@ -717,8 +717,7 @@ export default function ProfessorDashboard() {
                                 회차 삭제
                               </button>
                             </div>
-                            <StudentCountChart data={s.timeline || []} />
-                            <ReactionTimelineChart data={s.timeline || []} />
+                            <SessionFlowChart data={s.timeline || []} />
                             <div>
                               <div className="text-white/70 text-sm font-medium mb-2">
                                 질문 <span className="text-white/50 font-mono">({s.questions?.length || 0})</span>

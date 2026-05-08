@@ -13,7 +13,8 @@ const REDIS_URL = process.env.REDIS_URL
 const COURSE_TTL = 60 * 60 * 24 * 365     // 1년
 const GRACE_MS = 60 * 60 * 1000           // 교수자 disconnect grace 1시간
 const ARCHIVE_LIMIT = 30
-const SNAPSHOT_INTERVAL_MS = 15 * 1000
+// timeline은 변화 시점(reaction/join/leave)에만 push. 50ms 이내 변화는 덮어쓰기로 압축.
+const TIMELINE_COMPRESS_MS = 50
 const TIMELINE_MAX = 1000
 
 const app = next({ dev, hostname, port })
@@ -73,20 +74,25 @@ function countStates(students) {
 }
 const studentCountOf = students => students ? Object.keys(students).length : 0
 
-function maybeSnapshot(session, now = Date.now()) {
+// 변화 시점 push. 직전 점이 압축 윈도우 안이면 그 점을 덮어쓰기(데이터 폭주 방지).
+function recordChange(session, now = Date.now()) {
   if (!session.timeline) session.timeline = []
   const last = session.timeline[session.timeline.length - 1]
-  if (!last || now - last.t >= SNAPSHOT_INTERVAL_MS) {
-    session.timeline.push({
-      t: now,
-      counts: countStates(session.students),
-      studentCount: studentCountOf(session.students),
-    })
-    if (session.timeline.length > TIMELINE_MAX) session.timeline = session.timeline.slice(-TIMELINE_MAX)
+  const counts = countStates(session.students)
+  const sCount = studentCountOf(session.students)
+  if (last && now - last.t < TIMELINE_COMPRESS_MS) {
+    last.t = now
+    last.counts = counts
+    last.studentCount = sCount
+    return
+  }
+  session.timeline.push({ t: now, counts, studentCount: sCount })
+  if (session.timeline.length > TIMELINE_MAX) {
+    session.timeline = session.timeline.slice(-TIMELINE_MAX)
   }
 }
 
-// 종료 시점에는 interval 무시하고 강제 push (마지막 데이터 보존)
+// 종료 시점 — 압축 윈도우 무시하고 무조건 마지막 점 박음.
 function forceSnapshot(session, now = Date.now()) {
   if (!session.timeline) session.timeline = []
   session.timeline.push({
@@ -329,7 +335,7 @@ app.prepare().then(async () => {
           }
           const count = studentCountOf(s.students)
           if (count > (s.peakStudentCount || 0)) s.peakStudentCount = count
-          maybeSnapshot(s)
+          recordChange(s)
           await courseStore.save(courseId, course)
 
           io.to(courseId).emit('reaction-update', { reactions: countStates(s.students) })
@@ -370,7 +376,7 @@ app.prepare().then(async () => {
       stu.state = (stu.state === type) ? null : type
       stu.lastReactionAt = Date.now()
 
-      maybeSnapshot(s)
+      recordChange(s)
       await courseStore.save(cid, course)
 
       io.to(cid).emit('reaction-update', { reactions: countStates(s.students) })
@@ -395,7 +401,7 @@ app.prepare().then(async () => {
       if (course.currentSession.questions.length > 200) {
         course.currentSession.questions = course.currentSession.questions.slice(-200)
       }
-      maybeSnapshot(course.currentSession)
+      recordChange(course.currentSession)
       await courseStore.save(cid, course)
       io.to(cid).emit('new-question', {
         question,
@@ -521,7 +527,7 @@ app.prepare().then(async () => {
         if (stu) {
           stu.sockets = stu.sockets.filter(x => x !== socket.id)
           if (stu.sockets.length === 0) delete course.currentSession.students[sid]
-          maybeSnapshot(course.currentSession)
+          recordChange(course.currentSession)
           await courseStore.save(cid, course)
           io.to(cid).emit('reaction-update', { reactions: countStates(course.currentSession.students) })
           io.to(cid).emit('student-count', studentCountOf(course.currentSession.students))
