@@ -12,8 +12,7 @@
 
 [Releases 페이지](../../releases/latest)에서 본인 OS용 파일을 받으세요.
 
-- macOS Apple Silicon: `ClassBridge-x.y.z-arm64.dmg`
-- macOS Intel: `ClassBridge-x.y.z.dmg`
+- macOS (Intel/Apple Silicon 공통): `ClassBridge-x.y.z.dmg`
 - Windows: `ClassBridge-Setup-x.y.z.exe`
 
 학생 측은 별도 앱 없음 — 발급된 QR/링크를 모바일 브라우저로 열면 됩니다.
