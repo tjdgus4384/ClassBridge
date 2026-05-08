@@ -9,30 +9,34 @@ const { createAdapter } = require('@socket.io/redis-adapter')
 const dev = process.env.NODE_ENV !== 'production'
 const hostname = process.env.HOSTNAME || 'localhost'
 const port = parseInt(process.env.PORT || '3000', 10)
-const REDIS_URL = process.env.REDIS_URL // Fly.io가 자동 주입
-const COURSE_TTL = 60 * 60 * 24 * 365     // course는 1년 보관 (학기 4-5개월 안전)
-const GRACE_MS = 60 * 60 * 1000           // 교수자 disconnect 후 1시간 grace
-const ARCHIVE_LIMIT = 30                   // 회차 누적 상한
+const REDIS_URL = process.env.REDIS_URL
+const COURSE_TTL = 60 * 60 * 24 * 365     // 1년
+const GRACE_MS = 60 * 60 * 1000           // 교수자 disconnect grace 1시간
+const ARCHIVE_LIMIT = 30
+const SNAPSHOT_INTERVAL_MS = 15 * 1000
+const TIMELINE_MAX = 1000
 
 const app = next({ dev, hostname, port })
 const handle = app.getRequestHandler()
 
-// ─── 구조화 로그 ────────────────────────────────────────────────────────────
+// ─── 로그 ─────────────────────────────────────────────────────────────────
 function log(level, event, data = {}) {
   try {
     process.stdout.write(JSON.stringify({ t: new Date().toISOString(), level, event, ...data }) + '\n')
   } catch {}
 }
 
-// ─── 검증 ──────────────────────────────────────────────────────────────────
+// ─── 검증 ─────────────────────────────────────────────────────────────────
 const COURSE_ID_RE = /^[A-Z2-9]{6,8}$/
 const validCourseId = id => typeof id === 'string' && COURSE_ID_RE.test(id)
 const validToken = t => typeof t === 'string' && /^[a-f0-9]{32}$/.test(t)
+// 학생 디바이스 ID — uuid v4 또는 16~64자 영숫자/하이픈
+const validStudentId = id => typeof id === 'string' && /^[a-f0-9-]{16,64}$/i.test(id)
 
-// ─── Course/Session 헬퍼 ───────────────────────────────────────────────────
+// ─── Course/Session 헬퍼 ──────────────────────────────────────────────────
 function freshCourse(ownerToken) {
   return {
-    schemaV: 2,
+    schemaV: 3,
     ownerToken,
     name: null,
     createdAt: Date.now(),
@@ -48,17 +52,26 @@ function freshSession() {
     startedAt: now,
     lastSeen: now,
     endedAt: null,
-    reactions: { green: 0, yellow: 0, red: 0 },
+    // 학생 디바이스별 현재 상태 — 누적 카운터 X, 실시간 분포만.
+    // students[studentId] = { state, sockets[], joinedAt, lastReactionAt }
+    students: {},
     questions: [],
-    studentCount: 0,
     peakStudentCount: 0,
-    // 1분 간격 스냅샷 — 회차 히스토리 시계열 그래프용
-    timeline: [{ t: now, reactions: { green: 0, yellow: 0, red: 0 }, studentCount: 0 }],
+    timeline: [{ t: now, counts: { green: 0, yellow: 0, red: 0, none: 0 }, studentCount: 0 }],
   }
 }
 
-const SNAPSHOT_INTERVAL_MS = 60 * 1000
-const TIMELINE_MAX = 240
+function countStates(students) {
+  const c = { green: 0, yellow: 0, red: 0, none: 0 }
+  if (!students) return c
+  for (const id in students) {
+    const st = students[id].state
+    if (st === 'green' || st === 'yellow' || st === 'red') c[st]++
+    else c.none++
+  }
+  return c
+}
+const studentCountOf = students => students ? Object.keys(students).length : 0
 
 function maybeSnapshot(session, now = Date.now()) {
   if (!session.timeline) session.timeline = []
@@ -66,13 +79,22 @@ function maybeSnapshot(session, now = Date.now()) {
   if (!last || now - last.t >= SNAPSHOT_INTERVAL_MS) {
     session.timeline.push({
       t: now,
-      reactions: { ...session.reactions },
-      studentCount: session.studentCount || 0,
+      counts: countStates(session.students),
+      studentCount: studentCountOf(session.students),
     })
-    if (session.timeline.length > TIMELINE_MAX) {
-      session.timeline = session.timeline.slice(-TIMELINE_MAX)
-    }
+    if (session.timeline.length > TIMELINE_MAX) session.timeline = session.timeline.slice(-TIMELINE_MAX)
   }
+}
+
+// 종료 시점에는 interval 무시하고 강제 push (마지막 데이터 보존)
+function forceSnapshot(session, now = Date.now()) {
+  if (!session.timeline) session.timeline = []
+  session.timeline.push({
+    t: now,
+    counts: countStates(session.students),
+    studentCount: studentCountOf(session.students),
+  })
+  if (session.timeline.length > TIMELINE_MAX) session.timeline = session.timeline.slice(-TIMELINE_MAX)
 }
 
 function summarizeSession(s) {
@@ -80,24 +102,20 @@ function summarizeSession(s) {
     id: s.id,
     startedAt: s.startedAt,
     endedAt: s.endedAt,
-    reactions: s.reactions,
+    finalCounts: countStates(s.students),
     questionCount: s.questions.length,
-    questions: s.questions, // 본문 보관 (Phase 2에서 30일 후 prune 예정)
+    questions: s.questions,
     peakStudentCount: s.peakStudentCount,
     timeline: s.timeline || [],
   }
 }
 
-// 만료 판정 — 활성 세션이지만 grace 초과면 종료 처리. 부수효과로 archive 이동.
-// 반환: { expired: boolean, archivedSession: SessionSummary | null }
 function archiveIfExpired(course, now = Date.now()) {
   const s = course.currentSession
   if (!s || s.endedAt) return { expired: false, archivedSession: null }
   if (now - s.lastSeen <= GRACE_MS) return { expired: false, archivedSession: null }
   s.endedAt = s.lastSeen
-  // 종료 시점의 마지막 스냅샷 (interval 무시)
-  if (!s.timeline) s.timeline = []
-  s.timeline.push({ t: s.lastSeen, reactions: { ...s.reactions }, studentCount: s.studentCount || 0 })
+  forceSnapshot(s, s.lastSeen)
   const summary = summarizeSession(s)
   course.archivedSessions = course.archivedSessions || []
   course.archivedSessions.push(summary)
@@ -122,7 +140,7 @@ function generateCourseId() {
 const generateQuestionId = () => crypto.randomBytes(4).toString('hex')
 const generateOwnerToken = () => crypto.randomBytes(16).toString('hex')
 
-// ─── Rate limit (소켓 단위) ────────────────────────────────────────────────
+// ─── Rate limit ──────────────────────────────────────────────────────────
 function rateLimit(socket, key, minIntervalMs) {
   if (!socket.data.rl) socket.data.rl = {}
   const now = Date.now()
@@ -132,7 +150,7 @@ function rateLimit(socket, key, minIntervalMs) {
   return true
 }
 
-// ─── 부트 ───────────────────────────────────────────────────────────────────
+// ─── 부트 ────────────────────────────────────────────────────────────────
 app.prepare().then(async () => {
   const httpServer = createServer((req, res) => handle(req, res, parse(req.url, true)))
 
@@ -141,7 +159,6 @@ app.prepare().then(async () => {
     : '*'
   const io = new Server(httpServer, { cors: { origin: corsOrigins, methods: ['GET', 'POST'] } })
 
-  // Redis
   let redis = null
   if (REDIS_URL) {
     try {
@@ -180,12 +197,11 @@ app.prepare().then(async () => {
     },
   }
 
-  // ─── 소켓 ────────────────────────────────────────────────────────────────
+  // ─── 소켓 ─────────────────────────────────────────────────────────────
   io.on('connection', (socket) => {
     log('info', 'socket_connect', { sid: socket.id })
 
-    // 과목(course) 생성 — 교수자만 호출
-    // 옛날 'create-room'도 호환성 유지
+    // 강의 생성 (교수자) — create-course / create-room 둘 다 매핑
     const handleCreate = async (callback) => {
       if (!rateLimit(socket, 'create', 10_000)) {
         log('warn', 'rate_limited', { sid: socket.id, event: 'create-course' })
@@ -205,27 +221,22 @@ app.prepare().then(async () => {
       const ownerToken = generateOwnerToken()
       const course = freshCourse(ownerToken)
       await courseStore.save(courseId, course)
-
       socket.data.profOf = courseId
       log('info', 'course_created', { sid: socket.id, courseId })
-      // 호환: 옛날 클라는 res.roomId를 봄. 동일 키로 응답.
-      if (typeof callback === 'function') {
-        callback({ roomId: courseId, courseId, ownerToken })
-      }
+      if (typeof callback === 'function') callback({ roomId: courseId, courseId, ownerToken })
     }
     socket.on('create-course', handleCreate)
     socket.on('create-room', handleCreate)
 
-    // 입장 — 학생/교수자 공통 진입점
-    // 페이로드: { roomId|courseId, role, ownerToken? }
+    // 입장
     const handleJoin = async (payload) => {
       const courseId = payload?.courseId || payload?.roomId
       const role = payload?.role
       const ownerToken = payload?.ownerToken
+      const studentId = payload?.studentId
 
       if (!validCourseId(courseId)) {
         socket.emit('join-error', { reason: 'invalid_room_id' })
-        log('warn', 'join_invalid_id', { sid: socket.id, courseId })
         return
       }
       if (role !== 'student' && role !== 'professor') {
@@ -236,7 +247,6 @@ app.prepare().then(async () => {
       const course = await courseStore.get(courseId)
       if (!course) {
         socket.emit('join-error', { reason: 'room_not_found' })
-        log('warn', 'join_not_found', { sid: socket.id, courseId, role })
         return
       }
 
@@ -248,52 +258,58 @@ app.prepare().then(async () => {
           return
         }
         socket.data.profOf = courseId
+      } else {
+        // 학생 — studentId 필수
+        if (!validStudentId(studentId)) {
+          socket.emit('join-error', { reason: 'invalid_student_id' })
+          return
+        }
       }
 
       // 만료 lazy 판정
       const { expired, archivedSession } = archiveIfExpired(course)
 
-      // 이전 방 정리
+      // 이전 강의에서 빠져나오기
       if (socket.data.currentCourseId && socket.data.currentCourseId !== courseId) {
         const prevId = socket.data.currentCourseId
         socket.leave(prevId)
-        if (socket.data.currentRole === 'student') {
+        if (socket.data.currentRole === 'student' && socket.data.studentId) {
           const prev = await courseStore.get(prevId)
-          if (prev?.currentSession) {
-            prev.currentSession.studentCount = Math.max(0, prev.currentSession.studentCount - 1)
+          if (prev?.currentSession?.students?.[socket.data.studentId]) {
+            const stu = prev.currentSession.students[socket.data.studentId]
+            stu.sockets = stu.sockets.filter(x => x !== socket.id)
+            if (stu.sockets.length === 0) delete prev.currentSession.students[socket.data.studentId]
             await courseStore.save(prevId, prev)
-            io.to(prevId).emit('student-count', prev.currentSession.studentCount)
+            io.to(prevId).emit('reaction-update', { reactions: countStates(prev.currentSession.students) })
+            io.to(prevId).emit('student-count', studentCountOf(prev.currentSession.students))
           }
         }
       }
       socket.data.currentCourseId = courseId
       socket.data.currentRole = role
+      socket.data.studentId = role === 'student' ? studentId : null
       socket.join(courseId)
 
-      // 만료된 세션이 있었다면 모두에게 종료 알림
       if (expired) {
         io.to(courseId).emit('session-ended', { sessionId: archivedSession.id })
         log('info', 'session_archived', { courseId, sessionId: archivedSession.id })
       }
 
       if (role === 'professor') {
-        // 자동 시작 X — 명시적 'session-start'로만 시작.
-        // 단, grace 내 재접속이면 진행 중인 세션을 자연스럽게 이어감.
         const live = isSessionLive(course)
         if (live) {
           course.currentSession.lastSeen = Date.now()
           await courseStore.save(courseId, course)
         }
-
         const s = live ? course.currentSession : null
         socket.emit('room-state', {
           courseId,
           name: course.name,
           isLive: live,
           sessionId: s ? s.id : null,
-          reactions: s ? s.reactions : { green: 0, yellow: 0, red: 0 },
+          reactions: s ? countStates(s.students) : { green: 0, yellow: 0, red: 0, none: 0 },
           questions: s ? s.questions : [],
-          studentCount: s ? s.studentCount : 0,
+          studentCount: s ? studentCountOf(s.students) : 0,
           archivedSessions: course.archivedSessions || [],
         })
         log('info', live ? 'session_resumed' : 'professor_review_mode',
@@ -302,53 +318,71 @@ app.prepare().then(async () => {
         // 학생
         if (isSessionLive(course)) {
           const s = course.currentSession
-          s.studentCount = (s.studentCount || 0) + 1
-          if (s.studentCount > (s.peakStudentCount || 0)) s.peakStudentCount = s.studentCount
+          if (!s.students) s.students = {}
+          let stu = s.students[studentId]
+          if (!stu) {
+            stu = { state: null, sockets: [socket.id], joinedAt: Date.now(), lastReactionAt: 0 }
+            s.students[studentId] = stu
+          } else {
+            // 재접속 / 추가 디바이스 — 같은 studentId면 +1 X
+            if (!stu.sockets.includes(socket.id)) stu.sockets.push(socket.id)
+          }
+          const count = studentCountOf(s.students)
+          if (count > (s.peakStudentCount || 0)) s.peakStudentCount = count
           maybeSnapshot(s)
           await courseStore.save(courseId, course)
-          io.to(courseId).emit('student-count', s.studentCount)
+
+          io.to(courseId).emit('reaction-update', { reactions: countStates(s.students) })
+          io.to(courseId).emit('student-count', count)
           socket.emit('room-joined', {
             ok: true,
             sessionId: s.id,
             startedAt: s.startedAt,
-            reactions: s.reactions,
+            myState: stu.state,
+            reactions: countStates(s.students),
+            name: course.name,
           })
-          log('info', 'student_joined', { sid: socket.id, courseId, count: s.studentCount })
+          log('info', 'student_joined', { sid: socket.id, courseId, studentId, count })
         } else {
-          // 대기실 진입
-          socket.emit('session-waiting', { courseId })
-          log('info', 'student_waiting', { sid: socket.id, courseId })
+          socket.emit('session-waiting', { courseId, name: course.name })
         }
       }
     }
     socket.on('join-course', handleJoin)
     socket.on('join-room', handleJoin)
 
-    // 리액션 (학생)
+    // 리액션 — 토글: 같은 색 다시 누르면 해제, 다른 색이면 변경
     socket.on('reaction', async ({ roomId, courseId, type } = {}) => {
       const cid = courseId || roomId
       if (!validCourseId(cid)) return
       if (!['green', 'yellow', 'red'].includes(type)) return
       if (socket.data.currentCourseId !== cid) return
-      if (!rateLimit(socket, 'reaction', 800)) {
-        log('warn', 'rate_limited', { sid: socket.id, event: 'reaction', courseId: cid })
-        return
-      }
+      if (!socket.data.studentId) return
+      if (!rateLimit(socket, 'reaction', 50)) return
+
       const course = await courseStore.get(cid)
       if (!course || !isSessionLive(course)) return
-      course.currentSession.reactions[type]++
-      maybeSnapshot(course.currentSession)
+      const s = course.currentSession
+      if (!s.students) s.students = {}
+      const stu = s.students[socket.data.studentId]
+      if (!stu) return
+
+      stu.state = (stu.state === type) ? null : type
+      stu.lastReactionAt = Date.now()
+
+      maybeSnapshot(s)
       await courseStore.save(cid, course)
-      io.to(cid).emit('reaction-update', { reactions: course.currentSession.reactions })
+
+      io.to(cid).emit('reaction-update', { reactions: countStates(s.students) })
+      socket.emit('my-state', { state: stu.state })
     })
 
-    // 질문 (학생)
+    // 질문
     socket.on('question', async ({ roomId, courseId, text } = {}) => {
       const cid = courseId || roomId
       if (!validCourseId(cid)) return
       if (socket.data.currentCourseId !== cid) return
       if (!rateLimit(socket, 'question', 5_000)) {
-        log('warn', 'rate_limited', { sid: socket.id, event: 'question', courseId: cid })
         socket.emit('rate-limited', { event: 'question' })
         return
       }
@@ -373,10 +407,7 @@ app.prepare().then(async () => {
     socket.on('dismiss-question', async ({ roomId, courseId, questionId } = {}) => {
       const cid = courseId || roomId
       if (!validCourseId(cid)) return
-      if (socket.data.profOf !== cid) {
-        log('warn', 'unauthorized_action', { sid: socket.id, event: 'dismiss-question', courseId: cid })
-        return
-      }
+      if (socket.data.profOf !== cid) return
       const course = await courseStore.get(cid)
       if (!course?.currentSession) return
       course.currentSession.questions = course.currentSession.questions.filter(q => q.id !== questionId)
@@ -384,22 +415,7 @@ app.prepare().then(async () => {
       io.to(cid).emit('question-dismissed', { questionId })
     })
 
-    // 리액션 초기화 (교수자)
-    socket.on('clear-reactions', async ({ roomId, courseId } = {}) => {
-      const cid = courseId || roomId
-      if (!validCourseId(cid)) return
-      if (socket.data.profOf !== cid) {
-        log('warn', 'unauthorized_action', { sid: socket.id, event: 'clear-reactions', courseId: cid })
-        return
-      }
-      const course = await courseStore.get(cid)
-      if (!course?.currentSession) return
-      course.currentSession.reactions = { green: 0, yellow: 0, red: 0 }
-      await courseStore.save(cid, course)
-      io.to(cid).emit('reaction-update', { reactions: course.currentSession.reactions })
-    })
-
-    // 강의 이름 변경 (교수자) — ownerToken으로 직접 인증, 위젯 join 전에도 호출 가능
+    // 강의 이름 변경 (교수자)
     socket.on('course-rename', async ({ courseId, ownerToken, name } = {}, callback) => {
       if (!validCourseId(courseId)) {
         if (typeof callback === 'function') callback({ error: 'invalid_room_id' })
@@ -412,38 +428,43 @@ app.prepare().then(async () => {
       }
       if (!validToken(ownerToken) || ownerToken !== course.ownerToken) {
         if (typeof callback === 'function') callback({ error: 'unauthorized' })
-        log('warn', 'rename_unauthorized', { sid: socket.id, courseId })
         return
       }
       const trimmed = typeof name === 'string' ? name.trim().substring(0, 60) : ''
       course.name = trimmed || null
       await courseStore.save(courseId, course)
       io.to(courseId).emit('course-renamed', { name: course.name })
-      log('info', 'course_renamed', { courseId, hasName: !!course.name })
       if (typeof callback === 'function') callback({ ok: true, name: course.name })
     })
 
-    // 명시적 세션 시작 (교수자) — "수업 시작" 버튼
+    // 회차 삭제 (교수자) — archivedSessions에서 영구 제거
+    socket.on('delete-archived-session', async ({ roomId, courseId, sessionId } = {}) => {
+      const cid = courseId || roomId
+      if (!validCourseId(cid)) return
+      if (socket.data.profOf !== cid) {
+        log('warn', 'unauthorized_action', { sid: socket.id, event: 'delete-archived-session', courseId: cid })
+        return
+      }
+      if (typeof sessionId !== 'string' || !sessionId) return
+      const course = await courseStore.get(cid)
+      if (!course?.archivedSessions) return
+      const before = course.archivedSessions.length
+      course.archivedSessions = course.archivedSessions.filter(s => s.id !== sessionId)
+      if (course.archivedSessions.length === before) return
+      await courseStore.save(cid, course)
+      io.to(cid).emit('archived-deleted', { sessionId })
+      log('info', 'archived_deleted', { sid: socket.id, courseId: cid, sessionId })
+    })
+
+    // 명시적 시작 (교수자)
     socket.on('session-start', async ({ roomId, courseId } = {}, callback) => {
       const cid = courseId || roomId
-      if (!validCourseId(cid)) {
-        if (typeof callback === 'function') callback({ error: 'invalid_room_id' })
-        return
-      }
-      if (socket.data.profOf !== cid) {
-        if (typeof callback === 'function') callback({ error: 'unauthorized' })
-        log('warn', 'unauthorized_action', { sid: socket.id, event: 'session-start', courseId: cid })
-        return
-      }
+      if (!validCourseId(cid)) { if (typeof callback === 'function') callback({ error: 'invalid_room_id' }); return }
+      if (socket.data.profOf !== cid) { if (typeof callback === 'function') callback({ error: 'unauthorized' }); return }
       const course = await courseStore.get(cid)
-      if (!course) {
-        if (typeof callback === 'function') callback({ error: 'room_not_found' })
-        return
-      }
-      // 이미 라이브면 멱등 — 현재 세션을 그대로 알려줌
+      if (!course) { if (typeof callback === 'function') callback({ error: 'room_not_found' }); return }
       if (isSessionLive(course)) {
-        const s = course.currentSession
-        if (typeof callback === 'function') callback({ ok: true, sessionId: s.id, alreadyLive: true })
+        if (typeof callback === 'function') callback({ ok: true, sessionId: course.currentSession.id, alreadyLive: true })
         return
       }
       course.currentSession = freshSession()
@@ -456,7 +477,7 @@ app.prepare().then(async () => {
       if (typeof callback === 'function') callback({ ok: true, sessionId: course.currentSession.id })
     })
 
-    // 명시적 세션 종료 (교수자) — "수업 종료" 버튼 / 위젯 ✕ / Cmd+Q
+    // 명시적 종료 (교수자)
     socket.on('session-end', async ({ roomId, courseId } = {}) => {
       const cid = courseId || roomId
       if (!validCourseId(cid)) return
@@ -466,12 +487,7 @@ app.prepare().then(async () => {
       const now = Date.now()
       course.currentSession.lastSeen = now
       course.currentSession.endedAt = now
-      if (!course.currentSession.timeline) course.currentSession.timeline = []
-      course.currentSession.timeline.push({
-        t: now,
-        reactions: { ...course.currentSession.reactions },
-        studentCount: course.currentSession.studentCount || 0,
-      })
+      forceSnapshot(course.currentSession, now)
       const summary = summarizeSession(course.currentSession)
       course.archivedSessions = course.archivedSessions || []
       course.archivedSessions.push(summary)
@@ -485,7 +501,7 @@ app.prepare().then(async () => {
       log('info', 'session_ended_explicit', { sid: socket.id, courseId: cid, sessionId: endedSessionId })
     })
 
-    // 연결 해제 — 교수자: lastSeen만 갱신 (lazy 종료). 학생: studentCount 감소.
+    // disconnect — 학생: 해당 socket을 students[studentId].sockets에서 제거. sockets 비면 학생 삭제.
     socket.on('disconnect', async (reason) => {
       const cid = socket.data.currentCourseId
       if (!cid) {
@@ -499,11 +515,17 @@ app.prepare().then(async () => {
         course.currentSession.lastSeen = Date.now()
         await courseStore.save(cid, course)
         log('info', 'professor_disconnect', { courseId: cid, sessionId: course.currentSession.id })
-      } else if (socket.data.currentRole === 'student' && course.currentSession) {
-        course.currentSession.studentCount = Math.max(0, (course.currentSession.studentCount || 0) - 1)
-        maybeSnapshot(course.currentSession)
-        await courseStore.save(cid, course)
-        io.to(cid).emit('student-count', course.currentSession.studentCount)
+      } else if (socket.data.currentRole === 'student' && course.currentSession?.students) {
+        const sid = socket.data.studentId
+        const stu = sid ? course.currentSession.students[sid] : null
+        if (stu) {
+          stu.sockets = stu.sockets.filter(x => x !== socket.id)
+          if (stu.sockets.length === 0) delete course.currentSession.students[sid]
+          maybeSnapshot(course.currentSession)
+          await courseStore.save(cid, course)
+          io.to(cid).emit('reaction-update', { reactions: countStates(course.currentSession.students) })
+          io.to(cid).emit('student-count', studentCountOf(course.currentSession.students))
+        }
       }
       log('info', 'socket_disconnect', { sid: socket.id, reason, courseId: cid })
     })

@@ -1,11 +1,17 @@
 // 가벼운 SVG 차트 — 의존성 추가 없이 직접 그림.
-// timeline = [{ t, reactions: {green, yellow, red}, studentCount }]
+// Snapshot은 두 가지 형태를 받아준다:
+//  - 신 모델: { t, counts: {green, yellow, red, none}, studentCount }
+//  - 옛 모델: { t, reactions: {green, yellow, red}, studentCount }
+// 새 차트는 counts(=현재 그 상태에 있는 학생 수) 기준으로 그림.
 
 import { useMemo } from 'react'
 
+type Counts = { green: number; yellow: number; red: number; none?: number }
+
 export type Snapshot = {
   t: number
-  reactions: { green: number; yellow: number; red: number }
+  counts?: Counts
+  reactions?: Counts
   studentCount: number
 }
 
@@ -21,45 +27,50 @@ function formatTime(ts: number): string {
   return `${hh}:${mm}`
 }
 
+function getCounts(s: Snapshot): { green: number; yellow: number; red: number } {
+  const c = s.counts || s.reactions || { green: 0, yellow: 0, red: 0 }
+  return { green: c.green || 0, yellow: c.yellow || 0, red: c.red || 0 }
+}
+
 // ───────────────────────────────────────────────────────────────────────
-// 학생 수 라인 차트
+// 학생 수 차트 — step after (값은 다음 시점까지 유지). 경사 X 절벽 O.
 export function StudentCountChart({ data, color = '#a78bfa' }: {
   data: Snapshot[]
   color?: string
 }) {
-  const { points, areaPath, max, last, first } = useMemo(() => {
-    if (data.length < 2) return { points: '', areaPath: '', max: 0, last: 0, first: 0 }
-    const xs = data.map(d => d.t)
-    const ys = data.map(d => d.studentCount)
-    const tMin = xs[0], tMax = xs[xs.length - 1]
-    const yMax = Math.max(1, ...ys)
+  const { stepLine, areaPath } = useMemo(() => {
+    if (data.length < 2) return { stepLine: '', areaPath: '' }
+    const tMin = data[0].t
+    const tMax = data[data.length - 1].t
     const xRange = tMax - tMin || 1
-    const xy = data.map(d => {
-      const x = PAD_X + ((d.t - tMin) / xRange) * (VBOX_W - 2 * PAD_X)
-      const y = VBOX_H - PAD_Y - (d.studentCount / yMax) * (VBOX_H - 2 * PAD_Y)
-      return [x, y]
-    })
-    const points = xy.map(([x, y]) => `${x},${y}`).join(' ')
-    const areaPath =
-      `M ${xy[0][0]},${VBOX_H - PAD_Y} ` +
-      xy.map(([x, y]) => `L ${x},${y}`).join(' ') +
-      ` L ${xy[xy.length - 1][0]},${VBOX_H - PAD_Y} Z`
-    return {
-      points,
-      areaPath,
-      max: yMax,
-      last: ys[ys.length - 1],
-      first: ys[0],
+    const yMax = Math.max(1, ...data.map(d => d.studentCount || 0))
+    const xOf = (t: number) => PAD_X + ((t - tMin) / xRange) * (VBOX_W - 2 * PAD_X)
+    const yOf = (v: number) => VBOX_H - PAD_Y - (v / yMax) * (VBOX_H - 2 * PAD_Y)
+
+    // step after: M x0,y0  → 각 다음 점에 대해 H xi V yi
+    const lineCmds: string[] = []
+    const areaCmds: string[] = []
+    const x0 = xOf(data[0].t), y0 = yOf(data[0].studentCount || 0)
+    lineCmds.push(`M ${x0},${y0}`)
+    areaCmds.push(`M ${x0},${VBOX_H - PAD_Y}`, `L ${x0},${y0}`)
+    for (let i = 1; i < data.length; i++) {
+      const xi = xOf(data[i].t)
+      const yi = yOf(data[i].studentCount || 0)
+      lineCmds.push(`H ${xi}`, `V ${yi}`)
+      areaCmds.push(`H ${xi}`, `V ${yi}`)
     }
+    const lastX = xOf(data[data.length - 1].t)
+    areaCmds.push(`L ${lastX},${VBOX_H - PAD_Y} Z`)
+    return { stepLine: lineCmds.join(' '), areaPath: areaCmds.join(' ') }
   }, [data])
 
   if (data.length < 2) return <ChartEmpty />
+  const peak = Math.max(...data.map(d => d.studentCount || 0))
 
-  const peak = Math.max(...data.map(d => d.studentCount))
   return (
     <div>
       <div className="flex items-baseline justify-between mb-2">
-        <div className="text-white/70 text-sm font-medium">학생 수 변화</div>
+        <div className="text-white/70 text-sm font-medium">학생 수</div>
         <div className="text-white/50 text-xs">
           최대 <span className="text-white font-semibold">{peak}</span>명
         </div>
@@ -72,10 +83,8 @@ export function StudentCountChart({ data, color = '#a78bfa' }: {
               <stop offset="100%" stopColor={color} stopOpacity="0" />
             </linearGradient>
           </defs>
-          {/* y-grid (max line) */}
-          <line x1={PAD_X} x2={VBOX_W - PAD_X} y1={PAD_Y} y2={PAD_Y} stroke="rgba(255,255,255,0.06)" strokeDasharray="2 4" />
           <path d={areaPath} fill="url(#studentGrad)" />
-          <polyline points={points} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+          <path d={stepLine} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="miter" strokeLinecap="butt" />
         </svg>
         <TimeAxis first={data[0].t} last={data[data.length - 1].t} />
       </div>
@@ -84,78 +93,77 @@ export function StudentCountChart({ data, color = '#a78bfa' }: {
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// 리액션 stacked area — 1분 단위 신규 리액션 수
+// 상태 분포 시계열 — counts(현재 그 상태인 학생 수)를 stacked area로
 export function ReactionTimelineChart({ data }: { data: Snapshot[] }) {
-  const deltas = useMemo(() => {
-    if (data.length < 2) return []
-    return data.slice(1).map((s, i) => {
-      const prev = data[i]
-      const dg = Math.max(0, s.reactions.green - prev.reactions.green)
-      const dy = Math.max(0, s.reactions.yellow - prev.reactions.yellow)
-      const dr = Math.max(0, s.reactions.red - prev.reactions.red)
-      return { t: s.t, green: dg, yellow: dy, red: dr, total: dg + dy + dr }
-    })
-  }, [data])
+  const series = useMemo(() => data.map(d => ({ t: d.t, ...getCounts(d) })), [data])
 
-  const totals = useMemo(() => {
-    const last = data[data.length - 1]?.reactions || { green: 0, yellow: 0, red: 0 }
-    return last
-  }, [data])
+  // 가장 막혔던 순간 (red+yellow) — 메타 정보용
+  const peakStuck = useMemo(() => {
+    let max = 0
+    for (const s of series) {
+      const stuck = s.yellow + s.red
+      if (stuck > max) max = stuck
+    }
+    return max
+  }, [series])
 
-  if (deltas.length < 1) return <ChartEmpty />
+  const peakRed = useMemo(() => Math.max(0, ...series.map(s => s.red)), [series])
 
-  // y-max
-  const yMax = Math.max(1, ...deltas.map(d => d.total))
-  const tMin = deltas[0].t
-  const tMax = deltas[deltas.length - 1].t
+  if (series.length < 2) return <ChartEmpty />
+
+  const yMax = Math.max(1, ...series.map(s => s.green + s.yellow + s.red))
+  const tMin = series[0].t
+  const tMax = series[series.length - 1].t
   const xRange = tMax - tMin || 1
 
-  const greenPath: string[] = []
-  const yellowPath: string[] = []
-  const redPath: string[] = []
-  // baseline (bottom)
-  greenPath.push(`M ${PAD_X},${VBOX_H - PAD_Y}`)
-  yellowPath.push(`M ${PAD_X},${VBOX_H - PAD_Y}`)
-  redPath.push(`M ${PAD_X},${VBOX_H - PAD_Y}`)
+  const xOf = (t: number) => PAD_X + ((t - tMin) / xRange) * (VBOX_W - 2 * PAD_X)
+  const yOf = (v: number) => VBOX_H - PAD_Y - (v / yMax) * (VBOX_H - 2 * PAD_Y)
 
-  deltas.forEach((d) => {
-    const x = PAD_X + ((d.t - tMin) / xRange) * (VBOX_W - 2 * PAD_X)
-    const yG = VBOX_H - PAD_Y - (d.green / yMax) * (VBOX_H - 2 * PAD_Y)
-    const yY = VBOX_H - PAD_Y - ((d.green + d.yellow) / yMax) * (VBOX_H - 2 * PAD_Y)
-    const yR = VBOX_H - PAD_Y - ((d.green + d.yellow + d.red) / yMax) * (VBOX_H - 2 * PAD_Y)
-    greenPath.push(`L ${x},${yG}`)
-    yellowPath.push(`L ${x},${yY}`)
-    redPath.push(`L ${x},${yR}`)
-  })
-  // close back to baseline
-  const lastX = PAD_X + ((deltas[deltas.length - 1].t - tMin) / xRange) * (VBOX_W - 2 * PAD_X)
-  ;[greenPath, yellowPath, redPath].forEach(p => {
-    p.push(`L ${lastX},${VBOX_H - PAD_Y} Z`)
-  })
+  // step after stacked area — 각 색은 baseline에서 시작해서 stack-top까지 step.
+  // baseline(아래)에서 위쪽 윤곽까지 step으로 따라가다 닫음.
+  function stepArea(getTopValue: (s: typeof series[number]) => number) {
+    const cmds: string[] = []
+    const x0 = xOf(series[0].t)
+    const y0 = yOf(getTopValue(series[0]))
+    cmds.push(`M ${x0},${VBOX_H - PAD_Y}`, `L ${x0},${y0}`)
+    for (let i = 1; i < series.length; i++) {
+      const xi = xOf(series[i].t)
+      const yi = yOf(getTopValue(series[i]))
+      cmds.push(`H ${xi}`, `V ${yi}`)
+    }
+    const lastX = xOf(series[series.length - 1].t)
+    cmds.push(`L ${lastX},${VBOX_H - PAD_Y} Z`)
+    return cmds.join(' ')
+  }
 
-  const totalSum = totals.green + totals.yellow + totals.red
+  const greenPath = stepArea(s => s.green)
+  const yellowPath = stepArea(s => s.green + s.yellow)
+  const redPath = stepArea(s => s.green + s.yellow + s.red)
 
   return (
     <div>
       <div className="flex items-baseline justify-between mb-2">
-        <div className="text-white/70 text-sm font-medium">리액션 흐름</div>
+        <div className="text-white/70 text-sm font-medium">상태 분포</div>
         <div className="text-white/50 text-xs">
-          총 <span className="text-white font-semibold">{totalSum}</span>회
+          {peakRed > 0 ? (
+            <>최대 막힘 <span className="text-rose-400 font-semibold">{peakStuck}</span>명 (🔴 <span className="text-rose-400 font-semibold">{peakRed}</span>)</>
+          ) : (
+            <>최대 막힘 <span className="text-white font-semibold">{peakStuck}</span>명</>
+          )}
         </div>
       </div>
       <div className="bg-white/[0.03] border border-white/8 rounded-lg p-2">
         <svg viewBox={`0 0 ${VBOX_W} ${VBOX_H}`} className="w-full h-32" preserveAspectRatio="none">
-          {/* 빨강(가장 위) → 노랑 → 초록 순서로 그려야 stacked가 올바르게 누적 */}
-          <path d={redPath.join(' ')} fill="rgba(244,63,94,0.7)" />
-          <path d={yellowPath.join(' ')} fill="rgba(251,191,36,0.75)" />
-          <path d={greenPath.join(' ')} fill="rgba(16,185,129,0.8)" />
+          <path d={redPath} fill="rgba(244,63,94,0.7)" />
+          <path d={yellowPath} fill="rgba(251,191,36,0.75)" />
+          <path d={greenPath} fill="rgba(16,185,129,0.8)" />
         </svg>
         <TimeAxis first={tMin} last={tMax} />
       </div>
       <div className="flex items-center gap-4 mt-3 text-sm">
-        <LegendDot color="bg-emerald-500" label="이해 완료" count={totals.green} />
-        <LegendDot color="bg-amber-400" label="속도 조절" count={totals.yellow} />
-        <LegendDot color="bg-rose-500" label="재설명" count={totals.red} />
+        <LegendDot color="bg-emerald-500" label="이해 완료" />
+        <LegendDot color="bg-amber-400" label="속도 조절" />
+        <LegendDot color="bg-rose-500" label="재설명" />
       </div>
     </div>
   )
@@ -171,12 +179,11 @@ function TimeAxis({ first, last }: { first: number; last: number }) {
   )
 }
 
-function LegendDot({ color, label, count }: { color: string; label: string; count: number }) {
+function LegendDot({ color, label }: { color: string; label: string }) {
   return (
     <div className="flex items-center gap-1.5">
       <span className={`w-2.5 h-2.5 rounded-sm ${color}`} />
-      <span className="text-white/60">{label}</span>
-      <span className="text-white font-mono font-semibold tabular-nums">{count}</span>
+      <span className="text-white/70">{label}</span>
     </div>
   )
 }

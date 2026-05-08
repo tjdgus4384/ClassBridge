@@ -10,17 +10,20 @@ interface Question {
   timestamp: number
 }
 
+// 상태 모델: 현재 그 상태에 있는 학생 수
 interface Reactions {
   green: number
   yellow: number
   red: number
+  none: number
 }
 
 interface ArchivedSession {
   id: string
   startedAt: number
   endedAt: number
-  reactions: Reactions
+  finalCounts?: Reactions  // 신 모델
+  reactions?: Reactions    // 옛 호환
   questionCount: number
   questions: Question[]
   peakStudentCount: number
@@ -65,7 +68,7 @@ export default function ProfessorDashboard() {
   const [courseName, setCourseName] = useState<string | null>(null)
   const [isLive, setIsLive] = useState(false)
   const [starting, setStarting] = useState(false)
-  const [reactions, setReactions] = useState<Reactions>({ green: 0, yellow: 0, red: 0 })
+  const [reactions, setReactions] = useState<Reactions>({ green: 0, yellow: 0, red: 0, none: 0 })
   const [questions, setQuestions] = useState<Question[]>([])
   const [studentCount, setStudentCount] = useState(0)
   const [questionsOpen, setQuestionsOpen] = useState(false)
@@ -141,10 +144,14 @@ export default function ProfessorDashboard() {
     }
 
     const onCourseRenamed = ({ name }: { name: string | null }) => setCourseName(name)
+    const onArchivedDeleted = ({ sessionId }: { sessionId: string }) => {
+      setArchived(prev => prev.filter(s => s.id !== sessionId))
+      setOpenSessionId(prev => prev === sessionId ? null : prev)
+    }
     const onSessionStarted = () => {
       setIsLive(true)
       setStarting(false)
-      setReactions({ green: 0, yellow: 0, red: 0 })
+      setReactions({ green: 0, yellow: 0, red: 0, none: 0 })
       setQuestions([])
       setStudentCount(0)
     }
@@ -187,6 +194,7 @@ export default function ProfessorDashboard() {
     socket.on('student-count', onStudentCount)
     socket.on('session-started', onSessionStarted)
     socket.on('session-ended', onSessionEnded)
+    socket.on('archived-deleted', onArchivedDeleted)
 
     if (socket.connected) onConnect()
 
@@ -202,6 +210,7 @@ export default function ProfessorDashboard() {
       socket.off('student-count', onStudentCount)
       socket.off('session-started', onSessionStarted)
       socket.off('session-ended', onSessionEnded)
+      socket.off('archived-deleted', onArchivedDeleted)
     }
   }, [roomId, questionsOpen])
 
@@ -224,8 +233,15 @@ export default function ProfessorDashboard() {
     socketRef.current.emit('dismiss-question', { roomId, questionId })
   }, [roomId])
 
-  const clearReactions = useCallback(() => {
-    socketRef.current.emit('clear-reactions', { roomId })
+  const deleteArchivedSession = useCallback((s: ArchivedSession, num: number) => {
+    const dur = formatDuration(s.startedAt, s.endedAt)
+    const ok = window.confirm(
+      `${num}회차 (${formatDateTime(s.startedAt)}, ${dur})를 삭제할까요?\n` +
+      `질문 ${s.questionCount}개, 학생 최대 ${s.peakStudentCount}명.\n\n` +
+      `복구할 수 없습니다.`
+    )
+    if (!ok) return
+    socketRef.current.emit('delete-archived-session', { courseId: roomId, sessionId: s.id })
   }, [roomId])
 
   const startSession = useCallback(() => {
@@ -296,19 +312,21 @@ export default function ProfessorDashboard() {
     )
   }
 
-  // ── Energy Bar calculation ──────────────────────────────────────────────
-  const total = reactions.green + reactions.yellow + reactions.red
-  const greenPct = total > 0 ? (reactions.green / total) * 100 : 0
-  const yellowPct = total > 0 ? (reactions.yellow / total) * 100 : 0
-  const redPct = total > 0 ? (reactions.red / total) * 100 : 0
+  // ── 상태 분포 계산 ──────────────────────────────────────────────────────
+  // 응답한 학생만 비율 계산. none(미응답)은 별도 표시.
+  const responded = reactions.green + reactions.yellow + reactions.red
+  const total = responded + reactions.none
+  const greenPct = responded > 0 ? (reactions.green / responded) * 100 : 0
+  const yellowPct = responded > 0 ? (reactions.yellow / responded) * 100 : 0
+  const redPct = responded > 0 ? (reactions.red / responded) * 100 : 0
+  const respondedPct = total > 0 ? (responded / total) * 100 : 0
 
-  // Overall health score: 0–100
-  const healthScore = total > 0
-    ? Math.round((reactions.green * 100 + reactions.yellow * 50 + reactions.red * 0) / total)
-    : -1
-
-  const healthColor = healthScore >= 70 ? 'text-emerald-400' :
-                      healthScore >= 40 ? 'text-amber-400' : 'text-rose-400'
+  // Health: 응답자 중 막힘 비율. 빨강 > 노랑 > 초록 우선순위.
+  const healthLabel =
+    responded === 0 ? null
+    : redPct >= 20 ? { text: '🆘 재설명 필요', color: 'text-rose-400' }
+    : (redPct + yellowPct) >= 40 ? { text: '⚠️ 주의', color: 'text-amber-400' }
+    : { text: '👍 순항 중', color: 'text-emerald-400' }
 
   const studentUrl = baseUrl ? `${baseUrl}/s/${roomId}` : ''
 
@@ -318,11 +336,12 @@ export default function ProfessorDashboard() {
 
   // ── Compact (overlay) mode ──────────────────────────────────────────────
   if (compact) {
-    // 에너지 점: 3개 점으로 현재 상태 표현
+    // 다수결 + 위험 우선: 빨강 ≥ 20% → 빨강, (빨+노) ≥ 40% → 노랑, 그 외 → 초록.
+    // 응답 0이면 회색.
     const dominantColor =
-      total === 0 ? 'bg-white/20'
-      : redPct > 40 ? 'bg-rose-500'
-      : yellowPct > 40 ? 'bg-amber-400'
+      responded === 0 ? 'bg-white/30'
+      : redPct >= 20 ? 'bg-rose-500'
+      : (redPct + yellowPct) >= 40 ? 'bg-amber-400'
       : 'bg-emerald-400'
 
     return (
@@ -340,12 +359,12 @@ export default function ProfessorDashboard() {
                 <div className={`w-2 h-2 rounded-full transition-colors duration-700 ${dominantColor}`} />
               </div>
 
-              {/* 에너지 바 */}
+              {/* 응답 분포 바 — 응답자 비율 기반 */}
               <div
                 className="w-28 h-1.5 bg-white/[0.07] rounded-full overflow-hidden flex"
                 style={{ WebkitAppRegion: 'no-drag' } as any}
               >
-                {total > 0 && (
+                {responded > 0 && (
                   <>
                     <div className="bg-emerald-400 h-full transition-all duration-700 ease-out" style={{ width: `${greenPct}%` }} />
                     <div className="bg-amber-400 h-full transition-all duration-700 ease-out" style={{ width: `${yellowPct}%` }} />
@@ -433,16 +452,22 @@ export default function ProfessorDashboard() {
           className="border-b border-white/8 px-4 py-3 flex items-center justify-between"
           style={isWidget ? { WebkitAppRegion: 'drag' } as any : {}}
         >
-          <div className="flex items-center gap-3 min-w-0" style={{ WebkitAppRegion: 'no-drag' } as any}>
-            {isWidget && <span className="text-white/30 text-base cursor-grab">⠿</span>}
-            <div className="min-w-0">
+          <div className="flex items-center gap-3 min-w-0">
+            {isWidget && (
+              <span
+                className="text-white/40 hover:text-white/70 text-base cursor-grab select-none"
+                style={{ WebkitAppRegion: 'drag' } as any}
+                title="여기를 잡고 창을 움직일 수 있습니다"
+              >⠿</span>
+            )}
+            <div className="min-w-0" style={{ WebkitAppRegion: 'no-drag' } as any}>
               <div className="text-white text-sm font-semibold tracking-tight truncate">
                 {courseName || 'ClassBridge'}
               </div>
               <div className="text-white/50 text-xs font-mono mt-0.5">#{roomId}</div>
             </div>
             {/* 모드 인디케이터 */}
-            <div className="flex items-center gap-1.5 ml-2">
+            <div className="flex items-center gap-1.5 ml-2" style={{ WebkitAppRegion: 'no-drag' } as any}>
               {isLive ? (
                 <>
                   <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
@@ -512,33 +537,24 @@ export default function ProfessorDashboard() {
             </section>
           )}
 
-          {/* ── 라이브 모드 전용: Energy Bar + 질문 ── */}
+          {/* ── 라이브 모드 전용: 수업 온도계 + 질문 ── */}
           {isLive && (
           <>
           <section>
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-white/70 text-sm font-semibold tracking-tight">수업 온도계</h2>
-              <div className="flex items-center gap-3">
-                {healthScore >= 0 && (
-                  <span className={`text-sm font-semibold ${healthColor}`}>
-                    {healthScore >= 70 ? '👍 순항 중' : healthScore >= 40 ? '⚠️ 주의' : '🆘 재설명 필요'}
-                  </span>
-                )}
-                {total > 0 && (
-                  <button
-                    onClick={clearReactions}
-                    className="text-white/50 hover:text-white text-sm px-2 py-1 rounded-md hover:bg-white/5 transition-all"
-                  >
-                    초기화
-                  </button>
-                )}
-              </div>
+              {healthLabel && (
+                <span className={`text-sm font-semibold ${healthLabel.color}`}>
+                  {healthLabel.text}
+                </span>
+              )}
             </div>
 
+            {/* 응답자 비율 막대 */}
             <div className="h-7 bg-white/5 rounded-full overflow-hidden flex border border-white/8">
-              {total === 0 ? (
+              {responded === 0 ? (
                 <div className="w-full h-full flex items-center justify-center">
-                  <span className="text-white/40 text-sm">아직 반응 없음</span>
+                  <span className="text-white/40 text-sm">아직 응답한 학생이 없습니다</span>
                 </div>
               ) : (
                 <>
@@ -555,11 +571,23 @@ export default function ProfessorDashboard() {
               )}
             </div>
 
+            {/* 응답률 미니바 */}
+            {total > 0 && (
+              <div className="flex items-center gap-2 mt-2 text-xs">
+                <span className="text-white/50">응답</span>
+                <div className="flex-1 h-1 bg-white/5 rounded-full overflow-hidden">
+                  <div className="h-full bg-white/40 transition-all duration-500" style={{ width: `${respondedPct}%` }} />
+                </div>
+                <span className="text-white/70 font-mono tabular-nums">{responded}/{total}</span>
+              </div>
+            )}
+
             <div className="flex gap-5 mt-3 flex-wrap">
               {[
                 { emoji: '🟢', label: '이해 완료', count: reactions.green, color: 'text-emerald-400' },
                 { emoji: '🟡', label: '속도 조절', count: reactions.yellow, color: 'text-amber-400' },
                 { emoji: '🔴', label: '재설명', count: reactions.red, color: 'text-rose-400' },
+                { emoji: '⚪', label: '미응답', count: reactions.none, color: 'text-white/50' },
               ].map(({ emoji, label, count, color }) => (
                 <div key={label} className="flex items-center gap-1.5">
                   <span className="text-base">{emoji}</span>
@@ -567,10 +595,6 @@ export default function ProfessorDashboard() {
                   <span className={`text-sm font-mono font-semibold tabular-nums ${color}`}>{count}</span>
                 </div>
               ))}
-              <div className="ml-auto flex items-center gap-1.5">
-                <span className="text-white/50 text-sm">총</span>
-                <span className="text-white text-sm font-mono font-semibold tabular-nums">{total}</span>
-              </div>
             </div>
           </section>
 
@@ -664,7 +688,6 @@ export default function ProfessorDashboard() {
                     const num = sortedArchive.length - idx // 최신부터 N..1
                     const isOpen = openSessionId === s.id
                     const dur = formatDuration(s.startedAt, s.endedAt)
-                    const totalReactions = s.reactions.green + s.reactions.yellow + s.reactions.red
                     return (
                       <div key={s.id} className="bg-white/[0.04] border border-white/10 rounded-xl overflow-hidden">
                         <button
@@ -679,13 +702,21 @@ export default function ProfessorDashboard() {
                               {formatDateTime(s.startedAt)}
                             </div>
                             <div className="text-white/50 text-xs mt-0.5">
-                              {dur} · 학생 최대 {s.peakStudentCount}명 · 리액션 {totalReactions}회 · 질문 {s.questionCount}개
+                              {dur} · 학생 최대 {s.peakStudentCount}명 · 질문 {s.questionCount}개
                             </div>
                           </div>
                           <span className="text-white/40 text-sm">{isOpen ? '▲' : '▼'}</span>
                         </button>
                         {isOpen && (
                           <div className="border-t border-white/8 px-4 py-4 space-y-5 bg-black/20">
+                            <div className="flex justify-end -mt-1 -mr-1">
+                              <button
+                                onClick={() => deleteArchivedSession(s, num)}
+                                className="text-rose-400/70 hover:text-rose-400 hover:bg-rose-500/10 text-xs px-2.5 py-1 rounded-md transition-all"
+                              >
+                                회차 삭제
+                              </button>
+                            </div>
                             <StudentCountChart data={s.timeline || []} />
                             <ReactionTimelineChart data={s.timeline || []} />
                             <div>

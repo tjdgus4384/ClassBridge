@@ -3,30 +3,49 @@ import { useRouter } from 'next/router'
 import Head from 'next/head'
 import { getSocket } from '@/lib/socket'
 
-// Cooldown in seconds between reactions
-const REACTION_COOLDOWN = 30
-
 type ConnectionStatus = 'connecting' | 'connected' | 'disconnected'
+type SessionPhase = 'connecting' | 'waiting' | 'live'
+type ReactionType = 'green' | 'yellow' | 'red'
+
+// 학생 디바이스 ID — localStorage에 영구 저장. 서버 측 dedupe 키.
+function getStudentId(): string {
+  if (typeof window === 'undefined') return ''
+  const KEY = 'cb-sid'
+  try {
+    let id = localStorage.getItem(KEY)
+    if (!id) {
+      id = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : 'sid-' + Math.random().toString(16).slice(2) + Date.now().toString(16)
+      localStorage.setItem(KEY, id)
+    }
+    return id
+  } catch {
+    return 'sid-fallback-' + Date.now().toString(16)
+  }
+}
 
 export default function StudentRemote() {
   const router = useRouter()
   const { roomId } = router.query as { roomId: string }
 
-  type SessionPhase = 'connecting' | 'waiting' | 'live' | 'ended'
-
   const [status, setStatus] = useState<ConnectionStatus>('connecting')
   const [phase, setPhase] = useState<SessionPhase>('connecting')
-  const [cooldown, setCooldown] = useState(0) // seconds remaining
-  const [lastReaction, setLastReaction] = useState<'green' | 'yellow' | 'red' | null>(null)
+  const [courseName, setCourseName] = useState<string | null>(null)
+  const [myState, setMyState] = useState<ReactionType | null>(null)
   const [questionText, setQuestionText] = useState('')
   const [questionSent, setQuestionSent] = useState(false)
-  const [wakeLockActive, setWakeLockActive] = useState(false)
+  const [, setWakeLockActive] = useState(false)
   const [joinError, setJoinError] = useState<string | null>(null)
   const [toast, setToast] = useState<string | null>(null)
 
   const socketRef = useRef(getSocket())
+  const studentIdRef = useRef<string>('')
   const wakeLockRef = useRef<WakeLockSentinel | null>(null)
-  const cooldownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  useEffect(() => {
+    studentIdRef.current = getStudentId()
+  }, [])
 
   // ── Screen Wake Lock ────────────────────────────────────────────────────
   const requestWakeLock = useCallback(async () => {
@@ -34,13 +53,9 @@ export default function StudentRemote() {
       if ('wakeLock' in navigator) {
         wakeLockRef.current = await navigator.wakeLock.request('screen')
         setWakeLockActive(true)
-        wakeLockRef.current.addEventListener('release', () => {
-          setWakeLockActive(false)
-        })
+        wakeLockRef.current.addEventListener('release', () => setWakeLockActive(false))
       }
-    } catch {
-      // Wake lock not supported or denied — graceful fallback
-    }
+    } catch { /* graceful fallback */ }
   }, [])
 
   // ── Visibility API: re-acquire wake lock & reconnect ───────────────────
@@ -51,8 +66,13 @@ export default function StudentRemote() {
         const socket = socketRef.current
         if (!socket.connected) {
           socket.connect()
-        } else if (roomId) {
-          socket.emit('join-room', { roomId, role: 'student' })
+        } else if (roomId && studentIdRef.current) {
+          // 재join은 동일 studentId로 — 서버에서 dedupe되므로 학생 수 +1 안 됨
+          socket.emit('join-room', {
+            roomId,
+            role: 'student',
+            studentId: studentIdRef.current,
+          })
         }
       }
     }
@@ -65,23 +85,42 @@ export default function StudentRemote() {
     if (!roomId) return
     const socket = socketRef.current
 
-    const onConnect = () => {
-      setStatus('connected')
-      socket.emit('join-room', { roomId, role: 'student' })
+    const doJoin = () => {
+      if (!studentIdRef.current) return
+      socket.emit('join-room', {
+        roomId,
+        role: 'student',
+        studentId: studentIdRef.current,
+      })
     }
+
+    const onConnect = () => { setStatus('connected'); doJoin() }
     const onDisconnect = () => setStatus('disconnected')
-    const onRoomJoined = () => { setStatus('connected'); setJoinError(null); setPhase('live') }
-    const onSessionWaiting = () => { setStatus('connected'); setJoinError(null); setPhase('waiting') }
+    const onRoomJoined = (data: { myState?: ReactionType | null; name?: string | null }) => {
+      setStatus('connected')
+      setJoinError(null)
+      setPhase('live')
+      if (typeof data?.myState !== 'undefined') setMyState(data.myState ?? null)
+      if (typeof data?.name !== 'undefined') setCourseName(data.name ?? null)
+    }
+    const onSessionWaiting = (data?: { name?: string | null }) => {
+      setStatus('connected')
+      setJoinError(null)
+      setPhase('waiting')
+      setMyState(null)
+      if (data && typeof data.name !== 'undefined') setCourseName(data.name ?? null)
+    }
+    const onCourseRenamed = ({ name }: { name: string | null }) => setCourseName(name)
     const onSessionStarted = () => {
-      // 대기실에서 자동으로 활성 화면으로 전환 — 새 회차에 join 시도
-      socket.emit('join-room', { roomId, role: 'student' })
+      // 새 회차 시작 — 다시 join
+      doJoin()
     }
     const onSessionEnded = () => {
-      // 활성 → 대기실로 전환. 쿨다운/입력 상태는 정리.
       setPhase('waiting')
       setQuestionText('')
-      setLastReaction(null)
+      setMyState(null)
     }
+    const onMyState = ({ state }: { state: ReactionType | null }) => setMyState(state)
     const onJoinError = ({ reason }: { reason: string }) => setJoinError(reason)
     const onRateLimited = ({ event }: { event: string }) => {
       if (event === 'question') setToast('질문은 5초에 한 번만 보낼 수 있습니다.')
@@ -95,12 +134,12 @@ export default function StudentRemote() {
     socket.on('session-waiting', onSessionWaiting)
     socket.on('session-started', onSessionStarted)
     socket.on('session-ended', onSessionEnded)
+    socket.on('my-state', onMyState)
+    socket.on('course-renamed', onCourseRenamed)
     socket.on('join-error', onJoinError)
     socket.on('rate-limited', onRateLimited)
 
-    if (socket.connected) {
-      onConnect()
-    }
+    if (socket.connected) onConnect()
 
     requestWakeLock()
 
@@ -111,48 +150,31 @@ export default function StudentRemote() {
       socket.off('session-waiting', onSessionWaiting)
       socket.off('session-started', onSessionStarted)
       socket.off('session-ended', onSessionEnded)
+      socket.off('my-state', onMyState)
+      socket.off('course-renamed', onCourseRenamed)
       socket.off('join-error', onJoinError)
       socket.off('rate-limited', onRateLimited)
       wakeLockRef.current?.release()
     }
   }, [roomId, requestWakeLock])
 
-  // ── Cooldown Timer ──────────────────────────────────────────────────────
-  const startCooldown = useCallback(() => {
-    setCooldown(REACTION_COOLDOWN)
-    if (cooldownTimerRef.current) clearInterval(cooldownTimerRef.current)
-    cooldownTimerRef.current = setInterval(() => {
-      setCooldown((prev) => {
-        if (prev <= 1) {
-          clearInterval(cooldownTimerRef.current!)
-          return 0
-        }
-        return prev - 1
-      })
-    }, 1000)
-  }, [])
-
-  useEffect(() => () => { if (cooldownTimerRef.current) clearInterval(cooldownTimerRef.current) }, [])
-
-  // ── Send Reaction ───────────────────────────────────────────────────────
-  const sendReaction = useCallback((type: 'green' | 'yellow' | 'red') => {
-    if (cooldown > 0 || status !== 'connected') return
-    const socket = socketRef.current
-    socket.emit('reaction', { roomId, type })
-    setLastReaction(type)
-    startCooldown()
-  }, [cooldown, status, roomId, startCooldown])
+  // ── Send Reaction (토글) ────────────────────────────────────────────────
+  const sendReaction = useCallback((type: ReactionType) => {
+    if (status !== 'connected' || phase !== 'live') return
+    // 낙관 업데이트 — 서버 응답 'my-state' 받으면 보정
+    setMyState(prev => prev === type ? null : type)
+    socketRef.current.emit('reaction', { roomId, type })
+  }, [status, phase, roomId])
 
   // ── Send Question ───────────────────────────────────────────────────────
   const sendQuestion = useCallback(() => {
     const trimmed = questionText.trim()
-    if (!trimmed || status !== 'connected') return
-    const socket = socketRef.current
-    socket.emit('question', { roomId, text: trimmed })
+    if (!trimmed || status !== 'connected' || phase !== 'live') return
+    socketRef.current.emit('question', { roomId, text: trimmed })
     setQuestionText('')
     setQuestionSent(true)
     setTimeout(() => setQuestionSent(false), 2000)
-  }, [questionText, status, roomId])
+  }, [questionText, status, phase, roomId])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -162,30 +184,37 @@ export default function StudentRemote() {
   }
 
   // ── Reaction config ─────────────────────────────────────────────────────
-  const reactions = [
+  const reactions: Array<{
+    type: ReactionType
+    emoji: string
+    label: string
+    sublabel: string
+    bgIdle: string
+    bgActive: string
+  }> = [
     {
-      type: 'green' as const,
+      type: 'green',
       emoji: '🟢',
       label: '이해 완료',
       sublabel: 'Keep Going',
-      bg: 'bg-emerald-500/20 border-emerald-500/40 hover:bg-emerald-500/30 active:bg-emerald-500/50',
-      selected: 'ring-2 ring-emerald-400',
+      bgIdle: 'bg-emerald-500/15 border-emerald-500/30 hover:bg-emerald-500/25',
+      bgActive: 'bg-emerald-500/40 border-emerald-400 ring-2 ring-emerald-400/60 shadow-lg shadow-emerald-500/30',
     },
     {
-      type: 'yellow' as const,
+      type: 'yellow',
       emoji: '🟡',
       label: '속도 조절',
       sublabel: 'Slow Down',
-      bg: 'bg-amber-500/20 border-amber-500/40 hover:bg-amber-500/30 active:bg-amber-500/50',
-      selected: 'ring-2 ring-amber-400',
+      bgIdle: 'bg-amber-500/15 border-amber-500/30 hover:bg-amber-500/25',
+      bgActive: 'bg-amber-500/40 border-amber-400 ring-2 ring-amber-400/60 shadow-lg shadow-amber-500/30',
     },
     {
-      type: 'red' as const,
+      type: 'red',
       emoji: '🔴',
       label: '재설명 요청',
       sublabel: 'Hard Reset',
-      bg: 'bg-rose-500/20 border-rose-500/40 hover:bg-rose-500/30 active:bg-rose-500/50',
-      selected: 'ring-2 ring-rose-400',
+      bgIdle: 'bg-rose-500/15 border-rose-500/30 hover:bg-rose-500/25',
+      bgActive: 'bg-rose-500/40 border-rose-400 ring-2 ring-rose-400/60 shadow-lg shadow-rose-500/30',
     },
   ]
 
@@ -194,6 +223,7 @@ export default function StudentRemote() {
     const msg =
       joinError === 'room_not_found' ? '존재하지 않는 강의입니다. 코드를 다시 확인해 주세요.' :
       joinError === 'invalid_room_id' ? '잘못된 강의 코드입니다.' :
+      joinError === 'invalid_student_id' ? '디바이스 ID가 만들어지지 않았습니다. 페이지를 새로고침해 주세요.' :
       '입장에 실패했습니다.'
     return (
       <>
@@ -212,7 +242,7 @@ export default function StudentRemote() {
     )
   }
 
-  // ── 대기실 화면 (강의 시작 전 / 종료 후) ────────────────────────────────
+  // ── 대기실 화면 ─────────────────────────────────────────────────────────
   if (phase === 'waiting') {
     return (
       <>
@@ -225,15 +255,21 @@ export default function StudentRemote() {
           className="min-h-screen bg-[#0a0a0a] flex flex-col items-center justify-center px-6 text-center select-none"
           style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
         >
-          {/* 부드러운 펄스 점 */}
           <div className="relative flex items-center justify-center mb-8">
             <div className="absolute w-20 h-20 rounded-full bg-white/8 animate-ping" />
             <div className="w-3.5 h-3.5 rounded-full bg-white/60" />
           </div>
-          <p className="text-white/60 text-sm font-mono tracking-widest uppercase mb-3">{roomId}</p>
-          <h1 className="text-white text-2xl font-semibold mb-4">강의 시작 대기 중</h1>
-          <p className="text-white/70 text-base max-w-xs leading-relaxed">
-            교수님이 강의를 시작하면 자동으로 연결됩니다.<br/>이 페이지를 닫지 마세요.
+          {courseName ? (
+            <>
+              <h1 className="text-white text-2xl font-semibold mb-1">{courseName}</h1>
+              <p className="text-white/40 text-xs font-mono tracking-widest uppercase mb-4">#{roomId}</p>
+            </>
+          ) : (
+            <p className="text-white/60 text-sm font-mono tracking-widest uppercase mb-3">{roomId}</p>
+          )}
+          <p className="text-white text-lg font-medium mb-3">강의 시작 대기 중</p>
+          <p className="text-white/60 text-sm max-w-xs leading-relaxed">
+            교수님이 강의를 시작하면 자동으로 연결됩니다.
           </p>
           <div className="mt-12 flex items-center gap-2">
             <div className={`w-2.5 h-2.5 rounded-full transition-colors duration-300 ${
@@ -244,10 +280,7 @@ export default function StudentRemote() {
               {status === 'connected' ? '연결됨' : status === 'connecting' ? '연결 중...' : '연결 끊김'}
             </span>
           </div>
-          <a
-            href="/privacy"
-            className="mt-8 text-white/40 hover:text-white/70 text-xs underline-offset-2 hover:underline"
-          >
+          <a href="/privacy" className="mt-8 text-white/40 hover:text-white/70 text-xs underline-offset-2 hover:underline">
             개인정보처리방침
           </a>
         </div>
@@ -274,14 +307,19 @@ export default function StudentRemote() {
 
       <div className="min-h-screen bg-[#0a0a0a] flex flex-col select-none" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
 
-        {/* ── Header ── */}
-        <div className="flex items-center justify-between px-5 pt-6 pb-2">
-          <div className="flex items-center gap-2">
-            <span className="text-white/60 text-sm font-mono tracking-widest uppercase">
-              {roomId}
-            </span>
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 pt-6 pb-2 gap-3">
+          <div className="min-w-0 flex-1">
+            {courseName ? (
+              <>
+                <div className="text-white text-sm font-semibold truncate">{courseName}</div>
+                <div className="text-white/40 text-xs font-mono tracking-widest uppercase">#{roomId}</div>
+              </>
+            ) : (
+              <span className="text-white/60 text-sm font-mono tracking-widest uppercase">{roomId}</span>
+            )}
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 shrink-0">
             <div className={`w-2.5 h-2.5 rounded-full transition-colors duration-300 ${
               status === 'connected' ? 'bg-emerald-400' :
               status === 'connecting' ? 'bg-amber-400 animate-pulse' : 'bg-rose-500'
@@ -292,53 +330,45 @@ export default function StudentRemote() {
           </div>
         </div>
 
-        {/* ── Main Content ── */}
+        {/* Main */}
         <div className="flex-1 flex flex-col justify-center px-5 gap-7 max-w-sm mx-auto w-full">
 
-          {/* ── Reaction Section ── */}
           <div>
             <p className="text-white/60 text-sm uppercase tracking-widest mb-4 text-center font-medium">
-              수업 온도
+              지금 내 상태
             </p>
             <div className="flex flex-col gap-3">
-              {reactions.map(({ type, emoji, label, sublabel, bg, selected }) => (
-                <button
-                  key={type}
-                  onClick={() => sendReaction(type)}
-                  disabled={cooldown > 0 || status !== 'connected'}
-                  className={`
-                    relative flex items-center gap-4 px-5 py-5 rounded-2xl border transition-all duration-150
-                    ${bg}
-                    ${lastReaction === type && cooldown > 0 ? selected : ''}
-                    ${cooldown > 0 || status !== 'connected' ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}
-                  `}
-                >
-                  <span className="text-3xl">{emoji}</span>
-                  <div className="text-left">
-                    <div className="text-white text-base font-semibold">{label}</div>
-                    <div className="text-white/60 text-sm mt-0.5">{sublabel}</div>
-                  </div>
-                  {lastReaction === type && cooldown > 0 && (
-                    <div className="ml-auto text-white text-sm font-mono font-semibold">
-                      {cooldown}s
+              {reactions.map(({ type, emoji, label, sublabel, bgIdle, bgActive }) => {
+                const isActive = myState === type
+                return (
+                  <button
+                    key={type}
+                    onClick={() => sendReaction(type)}
+                    disabled={status !== 'connected'}
+                    className={`
+                      relative flex items-center gap-4 px-5 py-5 rounded-2xl border transition-all duration-150
+                      ${isActive ? bgActive : bgIdle}
+                      ${status !== 'connected' ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}
+                    `}
+                  >
+                    <span className="text-3xl">{emoji}</span>
+                    <div className="text-left flex-1">
+                      <div className="text-white text-base font-semibold">{label}</div>
+                      <div className="text-white/60 text-sm mt-0.5">{sublabel}</div>
                     </div>
-                  )}
-                </button>
-              ))}
+                    {isActive && (
+                      <span className="text-white/90 text-xs font-semibold tracking-wide">
+                        선택됨
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
             </div>
-
-            {/* Cooldown notice */}
-            {cooldown > 0 && (
-              <p className="text-white/60 text-sm text-center mt-3">
-                {cooldown}초 후 다시 전송 가능합니다
-              </p>
-            )}
           </div>
 
-          {/* ── Divider ── */}
           <div className="border-t border-white/8" />
 
-          {/* ── Question Section ── */}
           <div>
             <p className="text-white/60 text-sm uppercase tracking-widest mb-3 font-medium">
               익명 질문
@@ -379,15 +409,10 @@ export default function StudentRemote() {
           </div>
         </div>
 
-        {/* ── Footer ── */}
+        {/* Footer */}
         <div className="px-5 pb-6 text-center space-y-1">
-          <p className="text-white/50 text-sm">
-            ClassBridge · 익명 보장
-          </p>
-          <a
-            href="/privacy"
-            className="inline-block text-white/40 hover:text-white/70 text-xs underline-offset-2 hover:underline"
-          >
+          <p className="text-white/50 text-sm">ClassBridge · 익명 보장</p>
+          <a href="/privacy" className="inline-block text-white/40 hover:text-white/70 text-xs underline-offset-2 hover:underline">
             개인정보처리방침
           </a>
         </div>

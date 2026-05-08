@@ -94,35 +94,53 @@ public/                 favicon, manifest, og-image
 
 ### 핵심 이벤트 (Socket.IO)
 
-| 이벤트 | 방향 | 설명 |
+**클라 → 서버**
+| 이벤트 | 누가 | 설명 |
 |---|---|---|
-| `create-room` | C→S | 새 강의 생성. `{ roomId, ownerToken }` 응답 |
-| `join-room` | C→S | 입장 (`role: 'student' \| 'professor'`) |
-| `session-start` | C→S | 교수자가 명시적으로 라이브 회차 시작 |
-| `session-end` | C→S | 교수자가 명시적으로 회차 종료 |
-| `reaction` | C→S | 학생 신호등 리액션 |
-| `question` | C→S | 익명 질문 (50자 이내) |
-| `dismiss-question` / `clear-reactions` | C→S | 교수자 액션 |
-| `course-rename` | C→S | 강의 이름 변경 |
-| `room-state` / `student-count` / `reaction-update` / `new-question` / `session-started` / `session-ended` / `course-renamed` / `join-error` / `rate-limited` | S→C | broadcast |
+| `create-course` (legacy `create-room`) | 교수자 | 새 강의 생성. `{ roomId, courseId, ownerToken }` 응답 |
+| `join-course` (legacy `join-room`) | 양쪽 | 입장. 학생은 `studentId` 필수, 교수자는 `ownerToken` 필수 |
+| `session-start` | 교수자 | 라이브 회차 시작 (멱등) |
+| `session-end` | 교수자 | 회차 종료 (위젯 ✕ / Cmd+Q에서도 자동 호출) |
+| `reaction` | 학생 | 현재 상태 토글 (`green` / `yellow` / `red`) — 같은 색 다시 누르면 해제 |
+| `question` | 학생 | 익명 질문 (50자 이내) |
+| `dismiss-question` | 교수자 | 단일 질문 제거 |
+| `course-rename` | 교수자 | 강의 이름 변경 |
+| `delete-archived-session` | 교수자 | 종료된 회차 영구 삭제 |
 
-### 데이터 모델
+**서버 → 클라 (broadcast/emit)**
+- `room-state` — 위젯이 join 시 받음 (현재 상태 분포 + archivedSessions[])
+- `session-waiting` — 학생이 비활성 강의에 join 시 (대기실)
+- `room-joined` — 학생이 라이브 강의에 join 성공 (`myState`, 강의 이름 포함)
+- `session-started` / `session-ended` — 회차 라이프사이클 broadcast
+- `student-count` / `reaction-update` — 분포 변화 broadcast
+- `my-state` — 학생 본인의 토글 상태 정정 (서버 진실)
+- `new-question` / `question-dismissed` — 질문 변화
+- `course-renamed` — 강의 이름 갱신
+- `archived-deleted` — 회차 삭제 갱신
+- `join-error` / `rate-limited` — 에러/제한
+
+### 데이터 모델 (schema v3)
 
 **Course** (영구 — 1년 보관)
 - `ownerToken`: 32-hex 교수자 인증 토큰
-- `name`: 강의 이름 (선택)
+- `name`: 강의 이름 (선택, 60자 이내)
 - `currentSession`: 라이브 회차 1개 또는 null
-- `archivedSessions[]`: 종료된 회차 메타 + 본문 (최대 30개)
+- `archivedSessions[]`: 종료된 회차 (메타 + timeline + 질문 본문, 최대 30개)
 
-**Session**
-- `reactions: { green, yellow, red }`, `questions[]`, `studentCount`, `peakStudentCount`
-- `timeline[]`: 1분 간격 스냅샷 (최대 240포인트)
+**Session — 누적 카운터 X, 실시간 상태 모델**
+- `students: { [studentId]: { state, sockets[], joinedAt, lastReactionAt } }`
+  - 학생 디바이스별 현재 상태(`'green' | 'yellow' | 'red' | null`)
+  - 같은 `studentId`로 여러 socket 연결 시 한 학생으로 dedupe
+- `reactions`/`counts`(derived): `{ green, yellow, red, none }` — 각 상태 학생 수
+- `questions[]`, `peakStudentCount`
+- `timeline[]`: 15초 간격 lazy 스냅샷 (`{ t, counts, studentCount }`, 최대 1000포인트)
 - `lastSeen`: 교수자 disconnect 후 grace 판정용 (1시간)
 
 ### 보안
 
 - 교수자 인증: `ownerToken`(32-hex) — URL fragment(`#t=`)로 전달, sessionStorage + localStorage + Electron `userData/courses.json` 다중 보관
-- Rate limit: socket당 reaction 800ms / question 5s / create-room 10s
+- 학생 디바이스 ID: `localStorage['cb-sid']`(uuid) — 동일 학생의 다중 접속/visibility 토글에서 +1 카운트 방지. 익명 식별자로 서버는 IP/이름 등과 연결 불가.
+- Rate limit (socket당): `reaction` 50ms / `question` 5s / `create-course` 10s
 - 명시적 종료 흐름: 위젯 ✕ / Cmd+Q → IPC `flush-session` → renderer `session-end` emit → main `destroy()` (안전망 600ms)
 - 1시간 grace: 교수자 wifi 끊김에 회차가 쪼개지지 않도록
 
