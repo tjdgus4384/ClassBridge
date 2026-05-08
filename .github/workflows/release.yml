@@ -3,11 +3,11 @@ name: Build & Release Desktop App
 on:
   push:
     tags:
-      - 'v*'   # v0.1.0 같은 태그를 push하면 트리거
-  workflow_dispatch:   # 수동 실행도 허용
+      - 'v*'
+  workflow_dispatch:
 
 permissions:
-  contents: write   # Release 생성 및 업로드 권한
+  contents: write   # Release 생성/업로드 권한
 
 jobs:
   build:
@@ -18,10 +18,8 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            artifact: 'dist-electron/*.dmg'
             name: macos
           - os: windows-latest
-            artifact: 'dist-electron/*.exe'
             name: windows
 
     steps:
@@ -48,16 +46,31 @@ jobs:
             p.repository = { type: 'git', url: 'https://github.com/${{ github.repository }}.git' };
             fs.writeFileSync('package.json', JSON.stringify(p, null, 2));
           "
-          cat package.json | grep -A2 repository
 
-      - name: Build (electron-builder publish to GitHub)
+      # 빌드만 — publish는 다음 step에서 race-safe하게 처리
+      - name: Build (electron-builder, no publish)
         working-directory: electron
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # macOS 베타 — 코드사이닝 미사용
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: npx electron-builder --publish always
+        run: npx electron-builder --publish never
 
+      # softprops/action-gh-release는 같은 tag에 대한 동시 호출에 멱등적.
+      # 두 OS 잡이 동시에 호출해도 release를 한 번만 만들고, 산출물은 누적 attach.
+      - name: Attach binaries to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist-electron/*.dmg
+            dist-electron/*.exe
+            dist-electron/*.yml
+            dist-electron/*.blockmap
+          fail_on_unmatched_files: false
+          tag_name: ${{ github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 디버그용 artifacts (release attach 실패 시 fallback)
       - name: Upload artifacts (debug)
         if: always()
         uses: actions/upload-artifact@v4
@@ -65,4 +78,4 @@ jobs:
           name: electron-${{ matrix.name }}
           path: dist-electron/*
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 14
