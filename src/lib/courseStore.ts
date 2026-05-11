@@ -17,6 +17,7 @@ declare global {
       openWidget: (roomId: string, ownerToken?: string) => void
       closeWidget: () => void
       toggleCompact: (compact: boolean) => void
+      setLiveSize: (payload: { mode: 'review' } | { mode: 'live'; contentHeight: number }) => void
       openExternal: (url: string) => void
       onFlushSession?: (cb: (data: { kind: string }) => void) => () => void
       flushSessionDone?: () => void

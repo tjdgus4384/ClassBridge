@@ -14,6 +14,7 @@ let widgetWindow = null
 // 후 'flush-session-done' IPC 회신 → 그 시점에 위젯창 destroy.
 let pendingFlushTimer = null
 let isAppQuitting = false
+let widgetClosing = false   // 닫는 중에는 사이즈 변경 IPC 무시 (검토 사이즈 깜빡임 방지)
 
 function flushSession(kind, onDone) {
   if (!widgetWindow || widgetWindow.isDestroyed()) { onDone(); return }
@@ -69,8 +70,8 @@ function createWidgetWindow(roomId, ownerToken) {
     x: sw - 480,
     y: 20,
     frame: false,
-    transparent: false,
-    backgroundColor: '#0a0a0a',
+    transparent: true,                  // 미니 모드 비침용 (풀/검토는 CSS 거의 불투명)
+    backgroundColor: '#00000000',
     alwaysOnTop: true,
     hasShadow: true,
     resizable: true,
@@ -96,6 +97,7 @@ function createWidgetWindow(roomId, ownerToken) {
   widgetWindow.on('close', (e) => {
     if (!widgetWindow || widgetWindow.isDestroyed()) return
     if (widgetWindow._flushed) return // 이미 flush 후 destroy 진행 중
+    widgetClosing = true   // 사이즈 변경 차단
     e.preventDefault()
     flushSession('close', () => {
       if (widgetWindow && !widgetWindow.isDestroyed()) {
@@ -107,6 +109,7 @@ function createWidgetWindow(roomId, ownerToken) {
 
   widgetWindow.on('closed', () => {
     widgetWindow = null
+    widgetClosing = false
     // 위젯 닫혔으면 랜딩으로 복귀 (앱 종료 중이면 skip)
     if (isAppQuitting) return
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show()
@@ -133,29 +136,82 @@ const MINI_H = 52
 const FULL_W = 460
 const FULL_H = 720
 
+// 미니 토글은 라이브 모드 안에서만 발생 (미니 버튼이 라이브에서만 노출).
+// → width는 현재 값 유지(라이브는 288). height만 토글.
+// 미니→풀 시 임시 height로 키워두고, 곧 set-live-size의 ResizeObserver가 정확한 값으로 조정.
+const LIVE_TEMP_HEIGHT = 400
 ipcMain.on('toggle-compact', (_, { compact }) => {
   if (!widgetWindow || widgetWindow.isDestroyed()) return
+  if (widgetClosing) return  // 닫는 중에는 사이즈 변경 X
+
+  const cur = widgetWindow.getBounds()
+  const oldRight = cur.x + cur.width
+  const newWidth = cur.width  // width 유지 (검토 사이즈로 깜빡이지 않게)
+  const newHeight = compact ? MINI_H : LIVE_TEMP_HEIGHT
+
+  // 우측 끝 + 상단 y 고정
+  let newX = oldRight - newWidth
+  let newY = cur.y
+  const display = screen.getDisplayMatching(cur).workArea
+  newX = Math.max(display.x, Math.min(newX, display.x + display.width - newWidth))
+  newY = Math.max(display.y, Math.min(newY, display.y + display.height - newHeight))
+
   if (compact) {
-    // 순서 중요: 일부 Windows 환경에서 setResizable(false)가 먼저면 setSize가 무시됨.
-    // 1) 일단 resizable=true로 풀어놓고
     widgetWindow.setResizable(true)
-    // 2) min/max를 미니로 강제
-    widgetWindow.setMinimumSize(MINI_W, MINI_H)
-    widgetWindow.setMaximumSize(MINI_W, MINI_H)
-    // 3) 사이즈 변경 (animate 인자는 macOS 한정이라 생략)
-    widgetWindow.setSize(MINI_W, MINI_H)
-    // 4) 마지막에 resizable 잠금
+    widgetWindow.setMinimumSize(newWidth, MINI_H)
+    widgetWindow.setMaximumSize(newWidth, MINI_H)
+    widgetWindow.setBounds({ x: newX, y: newY, width: newWidth, height: newHeight })
     widgetWindow.setResizable(false)
   } else {
     widgetWindow.setResizable(true)
-    // min/max 풀기 (0,0 → 무제한)
     widgetWindow.setMinimumSize(0, 0)
     widgetWindow.setMaximumSize(0, 0)
-    widgetWindow.setSize(FULL_W, FULL_H)
+    widgetWindow.setBounds({ x: newX, y: newY, width: newWidth, height: newHeight })
   }
 })
 
 ipcMain.on('open-external', (_, url) => shell.openExternal(url))
+
+// 라이브/검토 모드별 위젯 사이즈 조절
+//  - { mode: 'review' } → 검토 풀 사이즈 (FULL_W × FULL_H)
+//  - { mode: 'live', contentHeight } → 미니 폭(288) × 본문 콘텐츠 높이
+//  - 미니 모드(MINI_H)일 때는 무시 — 미니 토글이 따로 처리
+const MIN_LIVE_HEIGHT = 120
+ipcMain.on('set-live-size', (_, payload) => {
+  if (!widgetWindow || widgetWindow.isDestroyed()) return
+  if (widgetClosing) return  // 닫는 중에는 사이즈 변경 X
+  const cur = widgetWindow.getBounds()
+  // 미니 모드면 무시 (height로 판정)
+  if (cur.height <= MINI_H + 2) return
+
+  const oldRight = cur.x + cur.width
+
+  let newWidth, newHeight
+  if (payload?.mode === 'review') {
+    newWidth = FULL_W
+    newHeight = FULL_H
+  } else if (payload?.mode === 'live') {
+    newWidth = MINI_W
+    const h = Math.round(payload.contentHeight || 0)
+    newHeight = Math.max(MIN_LIVE_HEIGHT, Math.min(h, FULL_H))
+  } else {
+    return
+  }
+  if (newWidth === cur.width && newHeight === cur.height) return
+
+  // 우측 끝 + 상단 y 고정
+  let newX = oldRight - newWidth
+  let newY = cur.y
+  const display = screen.getDisplayMatching(cur).workArea
+  newX = Math.max(display.x, Math.min(newX, display.x + display.width - newWidth))
+  newY = Math.max(display.y, Math.min(newY, display.y + display.height - newHeight))
+
+  // resizable 잠금/풀기 패턴 (Windows 안전)
+  widgetWindow.setResizable(true)
+  widgetWindow.setMinimumSize(0, 0)
+  widgetWindow.setMaximumSize(0, 0)
+  widgetWindow.setBounds({ x: newX, y: newY, width: newWidth, height: newHeight })
+})
 
 // ── 강의 목록 백업 (localStorage 손실 시 복구용) ──────────────────────────
 const coursesBackupPath = () => path.join(app.getPath('userData'), 'courses.json')

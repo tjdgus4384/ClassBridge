@@ -5,6 +5,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openWidget: (roomId, ownerToken) => ipcRenderer.send('open-widget', { roomId, ownerToken }),
   closeWidget: () => ipcRenderer.send('close-widget'),
   toggleCompact: (compact) => ipcRenderer.send('toggle-compact', { compact }),
+  // 라이브 모드는 미니 폭(288) + 본문 동적 높이, 검토는 풀(460×720) 복원.
+  // 미니 모드는 main이 무시.
+  setLiveSize: (payload) => ipcRenderer.send('set-live-size', payload),
   openExternal: (url) => ipcRenderer.send('open-external', url),
   // 메인이 종료 직전 호출 — 렌더러는 emit('session-end') 후 flushSessionDone() 회신
   onFlushSession: (cb) => {

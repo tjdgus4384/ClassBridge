@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useRouter } from 'next/router'
 import Head from 'next/head'
+import { QRCodeSVG } from 'qrcode.react'
 import { getSocket } from '@/lib/socket'
 import { SessionFlowChart, Snapshot } from '@/components/Charts'
 
@@ -76,6 +77,7 @@ export default function ProfessorDashboard() {
   const [archived, setArchived] = useState<ArchivedSession[]>([])
   const [bootstrapped, setBootstrapped] = useState(false) // 첫 room-state 도착 여부
   const [historyOpen, setHistoryOpen] = useState(true) // 검토 모드에선 기본 펼침
+  const [qrOpen, setQrOpen] = useState(false)
   const [openSessionId, setOpenSessionId] = useState<string | null>(null)
   const isWidget = widget === '1' || isElectron
 
@@ -83,6 +85,7 @@ export default function ProfessorDashboard() {
   const [compact, setCompact] = useState(false)
   const [baseUrl, setBaseUrl] = useState('')
   const ownerTokenRef = useRef<string | null>(null)
+  const contentRef = useRef<HTMLDivElement | null>(null)
 
   const socketRef = useRef(getSocket())
 
@@ -104,6 +107,21 @@ export default function ProfessorDashboard() {
       } catch {}
     }
   }, [roomId])
+
+  // 위젯 모드면 body를 투명하게 — Electron transparent: true와 같이 동작.
+  // 콘텐츠 컨테이너에 CSS bg-* 처리. 미니 모드만 비침, 풀/검토는 거의 불투명.
+  useEffect(() => {
+    const w = widget === '1' || !!window.electronAPI
+    if (!w) return
+    const prevBg = document.body.style.background
+    const prevHtmlBg = document.documentElement.style.background
+    document.body.style.background = 'transparent'
+    document.documentElement.style.background = 'transparent'
+    return () => {
+      document.body.style.background = prevBg
+      document.documentElement.style.background = prevHtmlBg
+    }
+  }, [widget])
 
   // ── Socket Setup ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -268,6 +286,41 @@ export default function ProfessorDashboard() {
     if (isElectron) window.electronAPI!.toggleCompact(val)
   }, [isElectron])
 
+  // ── 라이브 모드: 위젯 폭은 미니와 동일(288), 본문 높이는 콘텐츠에 맞춰 동적 ──
+  // 검토 모드면 풀 사이즈(460×720)로 복원. 미니면 main이 무시.
+  useEffect(() => {
+    if (!isElectron || compact) return
+    const api = window.electronAPI
+    if (!api?.setLiveSize) return
+
+    if (!isLive) {
+      // 검토 모드: 풀 사이즈 복원
+      api.setLiveSize({ mode: 'review' })
+      return
+    }
+
+    // 라이브 모드: 헤더 약 52 + 본문 콘텐츠 높이
+    if (!contentRef.current) return
+    const HEADER_H = 52
+    let raf = 0
+    const send = (h: number) => {
+      if (raf) cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(() => {
+        api.setLiveSize?.({ mode: 'live', contentHeight: Math.ceil(h) + HEADER_H })
+      })
+    }
+    // 초기 1회
+    send(contentRef.current.scrollHeight)
+    const ro = new ResizeObserver((entries) => {
+      for (const e of entries) send(e.target.scrollHeight)
+    })
+    ro.observe(contentRef.current)
+    return () => {
+      if (raf) cancelAnimationFrame(raf)
+      ro.disconnect()
+    }
+  }, [isElectron, isLive, compact, bootstrapped, questionsOpen])
+
   // 라이브 종료되면 미니 모드 자동 해제
   useEffect(() => {
     if (!isLive && compact) handleToggleCompact(false)
@@ -339,13 +392,6 @@ export default function ProfessorDashboard() {
   const redPct = responded > 0 ? (reactions.red / responded) * 100 : 0
   const respondedPct = total > 0 ? (responded / total) * 100 : 0
 
-  // Health: 응답자 중 막힘 비율. 빨강 > 노랑 > 초록 우선순위.
-  const healthLabel =
-    responded === 0 ? null
-    : redPct >= 20 ? { text: '🆘 재설명 필요', color: 'text-rose-400' }
-    : (redPct + yellowPct) >= 40 ? { text: '⚠️ 주의', color: 'text-amber-400' }
-    : { text: '👍 순항 중', color: 'text-emerald-400' }
-
   const studentUrl = baseUrl ? `${baseUrl}/s/${roomId}` : ''
 
   const copyLink = () => {
@@ -365,10 +411,10 @@ export default function ProfessorDashboard() {
     return (
       <>
         <Head><title>ClassBridge</title></Head>
-        {/* 창 배경 그대로 — 콘텐츠만 */}
+        {/* 미니 모드 — 반투명 + 블러로 슬라이드 비침. 모양은 풀 위젯과 동일한 둥근 사각형. */}
         <div
-          className="w-screen h-screen flex items-center select-none"
-          style={{ WebkitAppRegion: 'drag' } as any}
+          className="w-screen h-screen flex items-center select-none bg-black/65 backdrop-blur-2xl"
+          style={{ WebkitAppRegion: 'drag', borderRadius: 16 } as any}
         >
 
               {/* 드래그 영역 + 상태 dot */}
@@ -457,7 +503,7 @@ export default function ProfessorDashboard() {
       </Head>
 
       <div
-        className={`min-h-screen text-white relative ${isWidget ? 'bg-black/90 backdrop-blur-xl rounded-2xl' : 'bg-[#0d0d0d]'}`}
+        className={`min-h-screen text-white relative ${isWidget ? 'bg-[#0a0a0a] rounded-2xl' : 'bg-[#0d0d0d]'}`}
         style={isWidget ? { borderRadius: 16, overflow: 'hidden' } : {}}
       >
         {/* 라이브일 때 상단 1px LIVE 라인 — 시각적 모드 신호 */}
@@ -467,10 +513,10 @@ export default function ProfessorDashboard() {
 
         {/* ── Top Bar ── */}
         <div
-          className="border-b border-white/8 px-4 py-3 flex items-center justify-between"
+          className="border-b border-white/8 px-3 py-3 flex items-center justify-between gap-2"
           style={isWidget ? { WebkitAppRegion: 'drag' } as any : {}}
         >
-          <div className="flex items-center gap-3 min-w-0">
+          <div className="flex items-center gap-2 min-w-0">
             {isWidget && (
               <span
                 className="text-white/40 hover:text-white/70 text-base cursor-grab select-none"
@@ -478,45 +524,48 @@ export default function ProfessorDashboard() {
                 title="여기를 잡고 창을 움직일 수 있습니다"
               >⠿</span>
             )}
-            <div className="min-w-0" style={{ WebkitAppRegion: 'no-drag' } as any}>
-              <div className="text-white text-sm font-semibold tracking-tight truncate">
-                {courseName || 'ClassBridge'}
+            {/* 검토 모드: 강의 이름 + #코드 */}
+            {!isLive && (
+              <div className="min-w-0 flex items-baseline gap-1.5" style={{ WebkitAppRegion: 'no-drag' } as any}>
+                <span className="text-white text-sm font-semibold tracking-tight truncate">
+                  {courseName || 'ClassBridge'}
+                </span>
+                <span className="text-white/40 text-xs font-mono shrink-0">#{roomId}</span>
               </div>
-              <div className="text-white/50 text-xs font-mono mt-0.5">#{roomId}</div>
-            </div>
-            {/* 모드 인디케이터 */}
-            <div className="flex items-center gap-1.5 ml-2" style={{ WebkitAppRegion: 'no-drag' } as any}>
+            )}
+            {/* 모드 인디케이터 — 라이브는 좌측 메인 */}
+            <div className="flex items-center gap-1 shrink-0" style={{ WebkitAppRegion: 'no-drag' } as any}>
               {isLive ? (
                 <>
                   <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
                   <span className="text-emerald-400 text-sm font-semibold tracking-tight">LIVE</span>
-                  <span className="text-white/60 text-sm font-medium tabular-nums">· {studentCount}명</span>
+                  <span className="text-white/70 text-sm font-medium tabular-nums">· {studentCount}명</span>
                 </>
               ) : (
                 <>
-                  <div className={`w-2 h-2 rounded-full ${
+                  <div className={`w-1.5 h-1.5 rounded-full ${
                     status === 'connected' ? 'bg-white/40' :
                     status === 'connecting' ? 'bg-amber-400 animate-pulse' : 'bg-rose-500'
                   }`} />
-                  <span className="text-white/60 text-sm">
+                  <span className="text-white/60 text-xs">
                     {status === 'connected' ? '수업 시작 전' : status === 'connecting' ? '연결 중...' : '연결 끊김'}
                   </span>
                 </>
               )}
             </div>
           </div>
-          <div className="flex items-center gap-1.5" style={{ WebkitAppRegion: 'no-drag' } as any}>
+          <div className="flex items-center gap-1 shrink-0" style={{ WebkitAppRegion: 'no-drag' } as any}>
             {isLive && (
               <>
                 <button
                   onClick={endSession}
-                  className="text-rose-400 hover:text-white hover:bg-rose-500 text-sm font-semibold px-3 py-1.5 rounded-lg border border-rose-500/40 hover:border-rose-500 transition-all"
+                  className="text-rose-400 hover:text-white hover:bg-rose-500 text-xs font-semibold px-2 py-1 rounded-md border border-rose-500/40 hover:border-rose-500 transition-all"
                 >
-                  수업 종료
+                  종료
                 </button>
                 <button
                   onClick={() => handleToggleCompact(true)}
-                  className="text-white/60 hover:text-white text-sm px-3 py-1.5 rounded-lg border border-white/15 hover:border-white/30 transition-all"
+                  className="text-white/60 hover:text-white text-xs px-2 py-1 rounded-md border border-white/15 hover:border-white/30 transition-all"
                 >
                   미니
                 </button>
@@ -525,7 +574,7 @@ export default function ProfessorDashboard() {
             {isElectron && (
               <button
                 onClick={() => window.electronAPI!.closeWidget()}
-                className="text-white/50 hover:text-rose-400 text-sm px-3 py-1.5 rounded-lg border border-white/15 hover:border-rose-500/40 transition-all"
+                className="text-white/50 hover:text-rose-400 text-xs px-2 py-1 rounded-md border border-white/15 hover:border-rose-500/40 transition-all"
               >
                 ✕
               </button>
@@ -533,7 +582,7 @@ export default function ProfessorDashboard() {
           </div>
         </div>
 
-        <div className="max-w-2xl mx-auto px-6 py-7 space-y-8">
+        <div ref={contentRef} className="max-w-2xl mx-auto px-5 py-6 space-y-7">
 
           {/* ── 검토 모드 전용 영역 ── */}
           {!isLive && (
@@ -559,20 +608,11 @@ export default function ProfessorDashboard() {
           {isLive && (
           <>
           <section>
-            <div className="flex items-center justify-between mb-3">
-              <h2 className="text-white/70 text-sm font-semibold tracking-tight">수업 온도계</h2>
-              {healthLabel && (
-                <span className={`text-sm font-semibold ${healthLabel.color}`}>
-                  {healthLabel.text}
-                </span>
-              )}
-            </div>
-
             {/* 응답자 비율 막대 */}
             <div className="h-7 bg-white/5 rounded-full overflow-hidden flex border border-white/8">
               {responded === 0 ? (
                 <div className="w-full h-full flex items-center justify-center">
-                  <span className="text-white/40 text-sm">아직 응답한 학생이 없습니다</span>
+                  <span className="text-white/40 text-xs">아직 응답한 학생이 없습니다</span>
                 </div>
               ) : (
                 <>
@@ -600,16 +640,16 @@ export default function ProfessorDashboard() {
               </div>
             )}
 
-            <div className="flex gap-5 mt-3 flex-wrap">
+            {/* 카운트 4개 — 너비 균등 분배 */}
+            <div className="flex justify-between items-center mt-3">
               {[
-                { emoji: '🟢', label: '이해 완료', count: reactions.green, color: 'text-emerald-400' },
-                { emoji: '🟡', label: '속도 조절', count: reactions.yellow, color: 'text-amber-400' },
-                { emoji: '🔴', label: '재설명', count: reactions.red, color: 'text-rose-400' },
-                { emoji: '⚪', label: '미응답', count: reactions.none, color: 'text-white/50' },
-              ].map(({ emoji, label, count, color }) => (
-                <div key={label} className="flex items-center gap-1.5">
+                { emoji: '🟢', count: reactions.green, color: 'text-emerald-400' },
+                { emoji: '🟡', count: reactions.yellow, color: 'text-amber-400' },
+                { emoji: '🔴', count: reactions.red, color: 'text-rose-400' },
+                { emoji: '⚪', count: reactions.none, color: 'text-white/50' },
+              ].map(({ emoji, count, color }, i) => (
+                <div key={i} className="flex items-center gap-1">
                   <span className="text-base">{emoji}</span>
-                  <span className="text-white/70 text-sm">{label}</span>
                   <span className={`text-sm font-mono font-semibold tabular-nums ${color}`}>{count}</span>
                 </div>
               ))}
@@ -649,7 +689,7 @@ export default function ProfessorDashboard() {
             </div>
 
             {questionsOpen && (
-              <div className="space-y-2">
+              <div className="space-y-2 max-h-[40vh] overflow-y-auto pr-1">
                 {questions.length === 0 ? (
                   <div className="text-white/50 text-sm text-center py-8 border border-white/8 rounded-xl">
                     아직 질문이 없습니다
@@ -675,6 +715,9 @@ export default function ProfessorDashboard() {
           </section>
           </>
           )}
+
+          {/* ── 검토 모드 전용: 회차 히스토리 + 학생 링크 ── */}
+          {!isLive && (<>
 
           {/* ── 회차 히스토리 ── */}
           <section>
@@ -766,7 +809,7 @@ export default function ProfessorDashboard() {
           <section>
             <h2 className="text-white/70 text-sm font-semibold tracking-tight mb-3">학생 접속 링크</h2>
             <div className="bg-white/[0.04] border border-white/10 rounded-xl p-4 space-y-3">
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2">
                 <code className="flex-1 text-white text-sm font-mono break-all">
                   {studentUrl || `…/s/${roomId}`}
                 </code>
@@ -776,12 +819,32 @@ export default function ProfessorDashboard() {
                 >
                   복사
                 </button>
+                <button
+                  onClick={() => setQrOpen(v => !v)}
+                  className={`text-sm px-3 py-1.5 border rounded-lg transition-all whitespace-nowrap ${
+                    qrOpen
+                      ? 'text-white border-white/30 bg-white/5'
+                      : 'text-white/70 hover:text-white border-white/15 hover:border-white/30'
+                  }`}
+                >
+                  QR
+                </button>
               </div>
+              {qrOpen && studentUrl && (
+                <div className="bg-white rounded-xl p-4 flex items-center justify-center">
+                  <QRCodeSVG value={studentUrl} size={200} bgColor="#ffffff" fgColor="#0a0a0a" level="M" />
+                </div>
+              )}
               <p className="text-white/50 text-sm">
-                PPT QR 코드로 이 링크를 공유하거나, 학생에게 직접 전달하세요.
+                {qrOpen
+                  ? '학생들이 이 QR을 스캔하면 바로 접속됩니다.'
+                  : 'PPT QR 코드로 이 링크를 공유하거나, 학생에게 직접 전달하세요.'}
               </p>
             </div>
           </section>
+
+          </>)}
+          {/* ── 검토 모드 전용 영역 끝 ── */}
 
         </div>
       </div>
