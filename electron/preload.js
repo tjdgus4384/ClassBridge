@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 미니 모드는 main이 무시.
   setLiveSize: (payload) => ipcRenderer.send('set-live-size', payload),
   openExternal: (url) => ipcRenderer.send('open-external', url),
+  // 렌더러가 라이브 모드 진입/종료 시 호출 — main 이 ✕/Cmd+Q confirm 여부 판단
+  setLiveState: (isLive) => ipcRenderer.send('set-live-state', !!isLive),
   // 메인이 종료 직전 호출 — 렌더러는 emit('session-end') 후 flushSessionDone() 회신
   onFlushSession: (cb) => {
     const handler = (_e, data) => cb(data)

@@ -10,10 +10,13 @@
 
 ### 다운로드
 
-[Releases 페이지](../../releases/latest)에서 본인 OS용 파일을 받으세요.
+[Releases 페이지](../../releases/latest)에서 본인 기기에 맞는 파일을 받으세요.
 
-- macOS (Intel/Apple Silicon 공통): `ClassBridge-x.y.z.dmg`
+- macOS — Apple Silicon (M1/M2/M3/M4): `ClassBridge-x.y.z-arm64.dmg`
+- macOS — Intel: `ClassBridge-x.y.z.dmg`
 - Windows: `ClassBridge-Setup-x.y.z.exe`
+
+> Mac 칩 확인: 좌측 상단 사과 ▸ "이 Mac에 관하여" 에서 칩 항목 — "Apple M…" 이면 Apple Silicon, "Intel" 이면 Intel.
 
 학생 측은 별도 앱 없음 — 발급된 QR/링크를 모바일 브라우저로 열면 됩니다.
 

@@ -328,9 +328,18 @@ export default function ProfessorDashboard() {
 
   const endSession = useCallback(() => {
     if (!isLive) return
+    // 실수 종료 방지 — 한 번 더 확인. "지난 회차" 에서 archive 로 복기 가능함은 명시.
+    const ok = window.confirm('수업을 종료할까요?\n\n종료 후엔 "지난 회차" 에서 다시 확인할 수 있습니다.')
+    if (!ok) return
     socketRef.current.emit('session-end', { courseId: roomId, roomId })
     // setIsLive(false)는 onSessionEnded에서 처리됨
   }, [roomId, isLive])
+
+  // 라이브 상태를 Electron main 에 알림 — main 이 ✕/Cmd+Q 시점에 confirm dialog 띄울지 판단.
+  useEffect(() => {
+    if (!isElectron) return
+    try { window.electronAPI?.setLiveState?.(isLive) } catch {}
+  }, [isElectron, isLive])
 
   const handleToggleCompact = useCallback((val: boolean) => {
     setCompact(val)

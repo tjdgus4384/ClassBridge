@@ -19,6 +19,7 @@ declare global {
       toggleCompact: (compact: boolean) => void
       setLiveSize: (payload: { mode: 'review' } | { mode: 'live'; contentHeight: number }) => void
       openExternal: (url: string) => void
+      setLiveState?: (isLive: boolean) => void
       onFlushSession?: (cb: (data: { kind: string }) => void) => () => void
       flushSessionDone?: () => void
       readCoursesBackup?: () => Promise<StoredCourse[] | null>

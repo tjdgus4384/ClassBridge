@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen, shell } = require('electron')
+const { app, BrowserWindow, ipcMain, screen, shell, dialog } = require('electron')
 const path = require('path')
 const fs = require('fs')
 
@@ -15,6 +15,23 @@ let widgetWindow = null
 let pendingFlushTimer = null
 let isAppQuitting = false
 let widgetClosing = false   // 닫는 중에는 사이즈 변경 IPC 무시 (검토 사이즈 깜빡임 방지)
+let isLiveSession = false   // 렌더러가 set-live-state IPC 로 갱신. true 이면 ✕/Cmd+Q 시 confirm 요청.
+
+// 라이브 중에만 실수 종료 confirm — 검토 모드면 그냥 닫음.
+function confirmEndLiveSession(parent) {
+  if (!isLiveSession) return true
+  const win = parent && !parent.isDestroyed() ? parent : undefined
+  const choice = dialog.showMessageBoxSync(win, {
+    type: 'warning',
+    message: '진행 중인 수업이 있습니다',
+    detail: '지금 닫으면 현재 회차가 종료됩니다.\n종료된 회차는 "지난 회차" 에서 다시 확인할 수 있습니다.',
+    buttons: ['취소', '수업 종료하고 닫기'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  })
+  return choice === 1
+}
 
 function flushSession(kind, onDone) {
   if (!widgetWindow || widgetWindow.isDestroyed()) { onDone(); return }
@@ -127,10 +144,15 @@ function createWidgetWindow(roomId, ownerToken) {
   widgetWindow.loadURL(`${SERVER_URL}/p/${roomId}?widget=1${hash}`)
   widgetWindow.once('ready-to-show', () => widgetWindow && widgetWindow.show())
 
-  // 닫히기 직전 — 세션 종료 신호 emit 후 destroy
+  // 닫히기 직전 — 라이브 중이면 confirm 후 세션 종료 신호 emit 후 destroy
   widgetWindow.on('close', (e) => {
     if (!widgetWindow || widgetWindow.isDestroyed()) return
     if (widgetWindow._flushed) return // 이미 flush 후 destroy 진행 중
+    // 라이브면 한 번 확인. 취소면 close 중단.
+    if (!confirmEndLiveSession(widgetWindow)) {
+      e.preventDefault()
+      return
+    }
     widgetClosing = true   // 사이즈 변경 차단
     e.preventDefault()
     flushSession('close', () => {
@@ -144,6 +166,7 @@ function createWidgetWindow(roomId, ownerToken) {
   widgetWindow.on('closed', () => {
     widgetWindow = null
     widgetClosing = false
+    isLiveSession = false  // 다음 위젯 진입 시 stale 상태로 confirm 뜨지 않도록
     // 위젯 닫혔으면 랜딩으로 복귀 (앱 종료 중이면 skip)
     if (isAppQuitting) return
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show()
@@ -202,6 +225,11 @@ ipcMain.on('toggle-compact', (_, { compact }) => {
     widgetWindow.setMaximumSize(0, 0)
     widgetWindow.setBounds({ x: newX, y: newY, width: newWidth, height: newHeight })
   }
+})
+
+// 렌더러 → main: 라이브 모드 진입/종료 시 호출. ✕/Cmd+Q confirm dialog 판단에 사용.
+ipcMain.on('set-live-state', (_, live) => {
+  isLiveSession = !!live
 })
 
 // http/https만 허용 — 위젯이 어떤 식으로든 compromise 되어도 임의 OS protocol handler 실행 차단.
@@ -285,6 +313,11 @@ app.whenReady().then(() => {
 app.on('before-quit', (e) => {
   if (isAppQuitting) return
   if (widgetWindow && !widgetWindow.isDestroyed() && !widgetWindow._flushed) {
+    // 라이브면 한 번 확인. 취소면 quit 중단 (isAppQuitting 도 reset).
+    if (!confirmEndLiveSession(widgetWindow)) {
+      e.preventDefault()
+      return
+    }
     e.preventDefault()
     isAppQuitting = true
     flushSession('quit', () => {

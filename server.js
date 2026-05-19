@@ -275,29 +275,43 @@ app.prepare().then(async () => {
   // ─── Boot cleanup ────────────────────────────────────────────────────────
   // 이전 server 인스턴스의 socket id 들은 모두 죽었음 (이 인스턴스는 지금 막 시작).
   // crash 후 재기동, 또는 graceful shutdown 이 SIGTERM 안에 못 끝낸 경우의 안전망:
-  // 모든 라이브 세션의 professorSockets 를 비우고 lastSeen 을 now 로 reset.
+  // 이전 인스턴스에서 등록된 professorSockets 만 비우고 lastSeen 을 갱신.
   // 결과: 위젯 살아있던 교수자는 자동 reconnect 하면서 1h 안에 다시 등록됨 → 정상.
   //       위젯도 같이 죽었다면 1h 후 archive (정상 grace 동작).
   //
   // scanIterator 사용 — 직접 cursor 관리 시 node-redis v4 의 cursor 가 number 로 반환되어
   // `cursor !== '0'` 같은 strict 비교가 무한루프 되는 함정 회피.
   // 안전망: 15초 timeout 으로 bootCleanup 이 server listen 까지 막지 않게 보장.
+  //
+  // 동시성 보장 (v0.4.0):
+  //   1) timeout 발사 후 cleanup 은 background 로 계속 도는데, 그 사이 server listen 이 시작되어
+  //      새 prof socket 이 reconnect → professorSockets 에 추가될 수 있음. 그 신규 entry 를 cleanup 이
+  //      덮어쓰면 안 됨. → 각 course 처리를 withCourseLock 으로 직렬화.
+  //   2) "이전 인스턴스 socket" 의 판별: joinedAt < serverStartedAt. 신규 entry 는 자동 보존.
   if (redis) {
+    const serverStartedAt = Date.now()
     const cleanupPromise = (async () => {
       let cleared = 0
-      const now = Date.now()
       for await (const key of redis.scanIterator({ MATCH: 'course:*', COUNT: 100 })) {
-        const raw = await redis.get(key)
-        if (!raw) continue
-        try {
-          const c = JSON.parse(raw)
-          if (c?.currentSession?.professorSockets?.length) {
-            c.currentSession.professorSockets = []
-            c.currentSession.lastSeen = now
+        const courseId = key.startsWith('course:') ? key.slice('course:'.length) : key
+        await withCourseLock(courseId, async () => {
+          try {
+            const raw = await redis.get(key)
+            if (!raw) return
+            const c = JSON.parse(raw)
+            const s = c?.currentSession
+            if (!Array.isArray(s?.professorSockets) || s.professorSockets.length === 0) return
+            const fresh = s.professorSockets.filter(p => p?.joinedAt && p.joinedAt >= serverStartedAt)
+            if (fresh.length === s.professorSockets.length) return  // 전부 신규 — 손 안 댐
+            s.professorSockets = fresh
+            if (fresh.length === 0) {
+              // 모든 prof 가 stale 였음 → 지금이 "마지막 prof 떠난 시각" 으로 간주, grace 시작점.
+              s.lastSeen = Date.now()
+            }
             await redis.setEx(key, COURSE_TTL, JSON.stringify(c))
             cleared++
-          }
-        } catch {}
+          } catch {}
+        })
       }
       if (cleared) log('info', 'boot_cleanup', { coursesCleared: cleared })
     })()
@@ -308,8 +322,7 @@ app.prepare().then(async () => {
       await Promise.race([cleanupPromise, timeoutPromise])
     } catch (e) {
       log('warn', 'boot_cleanup_failed', { msg: e.message })
-      // timeout 이어도 cleanupPromise 는 background 에서 계속 진행 — 어쩔 수 없음.
-      // 그래도 listen 까지 진입은 보장됨.
+      // timeout 이어도 cleanupPromise 는 background 에서 계속 진행 — withCourseLock 으로 race-safe.
     }
   }
 
@@ -400,9 +413,10 @@ app.prepare().then(async () => {
       // ─── 이전 강의에서 빠지기 (이전 강의 lock 안) ───
       if (socket.data.currentCourseId && socket.data.currentCourseId !== courseId) {
         const prevId = socket.data.currentCourseId
+        const prevRole = socket.data.currentRole
         const prevSid = socket.data.studentId
         socket.leave(prevId)
-        if (socket.data.currentRole === 'student' && prevSid) {
+        if (prevRole === 'student' && prevSid) {
           let prevCounts = null, prevCount = 0
           await withCourseLock(prevId, async () => {
             const prev = await courseStore.get(prevId)
@@ -419,6 +433,22 @@ app.prepare().then(async () => {
             io.to(prevId).emit('reaction-update', { reactions: prevCounts })
             io.to(prevId).emit('student-count', prevCount)
           }
+        } else if (prevRole === 'professor') {
+          // 교수자가 다른 강의로 갈아탈 때 — 이전 course 의 professorSockets 에서 본인 제거.
+          // 안 빼면 zombie prof 가 PROF_SOCKET_STALE_MS(4h) 까지 남아 이전 강의 grace 가 멈춤.
+          await withCourseLock(prevId, async () => {
+            const prev = await courseStore.get(prevId)
+            if (!prev?.currentSession || prev.currentSession.endedAt) return
+            const before = (prev.currentSession.professorSockets || []).length
+            removeProfSocket(prev.currentSession, socket.id)
+            const after = prev.currentSession.professorSockets.length
+            if (before === after) return  // 본인 socket 이 없었으면 save 생략
+            if (activeProfCount(prev.currentSession) === 0) {
+              prev.currentSession.lastSeen = Date.now()
+            }
+            await courseStore.save(prevId, prev)
+            log('info', 'professor_switched_course', { sid: socket.id, fromCourse: prevId, toCourse: courseId })
+          })
         }
       }
 
