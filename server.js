@@ -11,7 +11,8 @@ const hostname = process.env.HOSTNAME || 'localhost'
 const port = parseInt(process.env.PORT || '3000', 10)
 const REDIS_URL = process.env.REDIS_URL
 const COURSE_TTL = 60 * 60 * 24 * 365     // 1년
-const GRACE_MS = 60 * 60 * 1000           // 교수자 disconnect grace 1시간
+const GRACE_MS = 60 * 60 * 1000           // 교수자 disconnect grace 1시간 — 마지막 교수자 소켓이 떠난 시점부터 카운트
+const PROF_SOCKET_STALE_MS = 4 * 60 * 60 * 1000   // 교수자 소켓이 4시간 이상 매달려 있으면 stale로 간주 (서버 crash 대비 안전망)
 const ARCHIVE_LIMIT = 30
 const MAX_STUDENTS_PER_SESSION = 500          // 한 회차 최대 동시 학생 수
 const ARCHIVED_QUESTION_PRUNE_MS = 30 * 24 * 60 * 60 * 1000  // 30일 후 본문 prune
@@ -62,8 +63,13 @@ function freshSession() {
   return {
     id: crypto.randomBytes(4).toString('hex'),
     startedAt: now,
+    // lastSeen은 "마지막 교수자 소켓이 떠난 시각" — 교수자가 붙어있는 동안엔 의미 없음.
+    // 첫 교수자가 끊기는 시점에 갱신되고, 그때부터 GRACE_MS 카운트 시작.
     lastSeen: now,
     endedAt: null,
+    // 현재 라이브 세션에 붙어있는 교수자 소켓 목록 — [{ sid, joinedAt }, ...]
+    // 한 명이라도 있으면 무조건 live, grace 무시. 비어있을 때만 lastSeen + GRACE_MS 체크.
+    professorSockets: [],
     // 학생 디바이스별 현재 상태 — 누적 카운터 X, 실시간 분포만.
     // students[studentId] = { state, sockets[], joinedAt, lastReactionAt }
     students: {},
@@ -71,6 +77,23 @@ function freshSession() {
     peakStudentCount: 0,
     timeline: [{ t: now, counts: { green: 0, yellow: 0, red: 0, none: 0 }, studentCount: 0 }],
   }
+}
+
+// ─── 교수자 소켓 트래킹 ─────────────────────────────────────────────────────
+// "교수자 위젯이 떠있는 동안엔 절대 grace 안 일어남" 보장을 위한 기본 단위.
+function activeProfCount(s, now = Date.now()) {
+  if (!Array.isArray(s?.professorSockets)) return 0
+  return s.professorSockets.filter(p => p && p.joinedAt && now - p.joinedAt < PROF_SOCKET_STALE_MS).length
+}
+function addProfSocket(s, sid) {
+  if (!Array.isArray(s.professorSockets)) s.professorSockets = []
+  // 동일 sid 중복 제거 후 추가 — 같은 socket이 두 번 join하는 케이스 방어
+  s.professorSockets = s.professorSockets.filter(p => p && p.sid !== sid)
+  s.professorSockets.push({ sid, joinedAt: Date.now() })
+}
+function removeProfSocket(s, sid) {
+  if (!Array.isArray(s.professorSockets)) { s.professorSockets = []; return }
+  s.professorSockets = s.professorSockets.filter(p => p && p.sid !== sid)
 }
 
 function countStates(students) {
@@ -130,9 +153,12 @@ function summarizeSession(s) {
 function archiveIfExpired(course, now = Date.now()) {
   const s = course.currentSession
   if (!s || s.endedAt) return { expired: false, archivedSession: null }
+  // 교수자 소켓이 하나라도 살아있으면 절대 archive 하지 않음.
+  if (activeProfCount(s, now) > 0) return { expired: false, archivedSession: null }
+  // 모두 끊긴 뒤 grace 경과 시에만 archive.
   if (now - s.lastSeen <= GRACE_MS) return { expired: false, archivedSession: null }
-  s.endedAt = s.lastSeen
-  forceSnapshot(s, s.lastSeen)
+  s.endedAt = now
+  forceSnapshot(s, now)
   const summary = summarizeSession(s)
   course.archivedSessions = course.archivedSessions || []
   course.archivedSessions.push(summary)
@@ -145,7 +171,9 @@ function archiveIfExpired(course, now = Date.now()) {
 
 function isSessionLive(course) {
   const s = course.currentSession
-  return !!(s && !s.endedAt && (Date.now() - s.lastSeen <= GRACE_MS))
+  if (!s || s.endedAt) return false
+  if (activeProfCount(s) > 0) return true
+  return Date.now() - s.lastSeen <= GRACE_MS
 }
 
 // 30일 지난 archived 회차의 질문 본문 제거 (count + 그래프는 유지).
@@ -210,7 +238,12 @@ app.prepare().then(async () => {
     log('warn', 'cors_origin_unset_in_production', {})
     corsOrigins = false  // socket.io: cross-origin 거부
   }
-  const io = new Server(httpServer, { cors: { origin: corsOrigins, methods: ['GET', 'POST'] } })
+  const io = new Server(httpServer, {
+    cors: { origin: corsOrigins, methods: ['GET', 'POST'] },
+    // 강의실 Wi-Fi jitter / Windows TCP retransmit 한 박자 늦어도 끊지 않게 — 기본 20s → 60s.
+    pingTimeout: 60_000,
+    pingInterval: 25_000,
+  })
 
   let redis = null
   if (REDIS_URL) {
@@ -365,7 +398,8 @@ app.prepare().then(async () => {
         if (role === 'professor') {
           const live = isSessionLive(course)
           if (live) {
-            course.currentSession.lastSeen = Date.now()
+            addProfSocket(course.currentSession, socket.id)
+            course.currentSession.lastSeen = Date.now()   // 마지막으로 본 시각 — 끊긴 후 grace 시작점이 됨
             needSave = true
           }
           if (needSave) await courseStore.save(courseId, course)
@@ -615,10 +649,15 @@ app.prepare().then(async () => {
       const course = await courseStore.get(cid)
       if (!course) { if (typeof callback === 'function') callback({ error: 'room_not_found' }); return }
       if (isSessionLive(course)) {
+        // 이미 live면 현재 socket을 professorSockets에 등록 — 재시작 직후 widget이 살아있다는 사실 명시.
+        addProfSocket(course.currentSession, socket.id)
+        await courseStore.save(cid, course)
         if (typeof callback === 'function') callback({ ok: true, sessionId: course.currentSession.id, alreadyLive: true })
         return
       }
       course.currentSession = freshSession()
+      // 시작 버튼 누른 교수자의 socket을 첫 번째 멤버로 등록.
+      addProfSocket(course.currentSession, socket.id)
       await courseStore.save(cid, course)
       io.to(cid).emit('session-started', {
         sessionId: course.currentSession.id,
@@ -675,9 +714,18 @@ app.prepare().then(async () => {
         if (!course) return
 
         if (socket.data.currentRole === 'professor' && course.currentSession && !course.currentSession.endedAt) {
-          course.currentSession.lastSeen = Date.now()
+          removeProfSocket(course.currentSession, socket.id)
+          const remaining = activeProfCount(course.currentSession)
+          // 마지막 교수자 소켓이 떠난 시점에만 lastSeen 갱신 — 여기서부터 GRACE_MS 카운트 시작.
+          if (remaining === 0) {
+            course.currentSession.lastSeen = Date.now()
+          }
           await courseStore.save(cid, course)
-          log('info', 'professor_disconnect', { courseId: cid, sessionId: course.currentSession.id })
+          log('info', 'professor_disconnect', {
+            courseId: cid,
+            sessionId: course.currentSession.id,
+            profSocketsLeft: remaining,
+          })
         } else if (socket.data.currentRole === 'student' && course.currentSession?.students) {
           const sid = socket.data.studentId
           const stu = sid ? course.currentSession.students[sid] : null

@@ -52,6 +52,7 @@ function createLandingWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,           // Chromium sandbox 안에서 renderer 실행
+      backgroundThrottling: false,   // unfocused 상태에서도 setInterval/setTimeout 정상 속도 — socket heartbeat 보호
     },
   })
   mainWindow.loadURL(SERVER_URL)
@@ -84,6 +85,7 @@ function createWidgetWindow(roomId, ownerToken) {
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,           // Chromium sandbox 안에서 renderer 실행
+      backgroundThrottling: false,   // ★ 가장 중요. PPT 풀스크린 뒤에서도 socket heartbeat 안 끊기게.
     },
   })
 

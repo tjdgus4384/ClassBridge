@@ -39,7 +39,12 @@ function decompose(s: Snapshot): { green: number; yellow: number; red: number; n
 
 // ───────────────────────────────────────────────────────────────────────
 export function SessionFlowChart({ data }: { data: Snapshot[] }) {
-  const series = useMemo(() => data.map(d => ({ t: d.t, ...decompose(d) })), [data])
+  // t 오름차순으로 정렬 — 옛 archive 데이터는 forceSnapshot 백데이트로 마지막 점이 중간 시각에 박혀있을 수
+  // 있음. step path가 꼬이지 않도록 항상 정렬해서 사용.
+  const series = useMemo(
+    () => data.map(d => ({ t: d.t, ...decompose(d) })).sort((a, b) => a.t - b.t),
+    [data]
+  )
 
   const peakStudent = useMemo(
     () => Math.max(0, ...series.map(s => s.green + s.yellow + s.red + s.none)),
@@ -55,6 +60,7 @@ export function SessionFlowChart({ data }: { data: Snapshot[] }) {
   // y축 — 응답 max에 약간 여유(20%) 더해서 천장 닿지 않게.
   const yMax = Math.max(2, Math.ceil(peakResponded * 1.2))
 
+  // x축 — 정렬된 series의 양 끝.
   const tMin = series[0].t
   const tMax = series[series.length - 1].t
   const xRange = tMax - tMin || 1
