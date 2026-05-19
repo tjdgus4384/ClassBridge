@@ -172,7 +172,15 @@ ipcMain.on('toggle-compact', (_, { compact }) => {
   }
 })
 
-ipcMain.on('open-external', (_, url) => shell.openExternal(url))
+// http/https만 허용 — 위젯이 어떤 식으로든 compromise 되어도 임의 OS protocol handler 실행 차단.
+ipcMain.on('open-external', (_, url) => {
+  if (typeof url !== 'string') return
+  try {
+    const u = new URL(url)
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return
+    shell.openExternal(url)
+  } catch {}
+})
 
 // 라이브/검토 모드별 위젯 사이즈 조절
 //  - { mode: 'review' } → 검토 풀 사이즈 (FULL_W × FULL_H)

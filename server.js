@@ -157,8 +157,12 @@ function archiveIfExpired(course, now = Date.now()) {
   if (activeProfCount(s, now) > 0) return { expired: false, archivedSession: null }
   // 모두 끊긴 뒤 grace 경과 시에만 archive.
   if (now - s.lastSeen <= GRACE_MS) return { expired: false, archivedSession: null }
-  s.endedAt = now
-  forceSnapshot(s, now)
+  // endedAt 은 archive 가 실제로 발동된 now 가 아니라 "grace 가 만료된 순간".
+  // archive 발동은 lazy 라서 한참 늦게 일어날 수 있는데 (예: 5h 뒤 누군가 들어와서 trigger),
+  // 사용자가 보는 회차 종료 시각이 그 늦은 timestamp 가 되면 안 됨.
+  const archivedAt = s.lastSeen + GRACE_MS
+  s.endedAt = archivedAt
+  forceSnapshot(s, archivedAt)
   const summary = summarizeSession(s)
   course.archivedSessions = course.archivedSessions || []
   course.archivedSessions.push(summary)
@@ -209,8 +213,13 @@ const courseLocks = new Map()
 async function withCourseLock(courseId, fn) {
   const prev = courseLocks.get(courseId) || Promise.resolve()
   const next = prev.then(fn, fn)  // 이전이 실패해도 다음 작업은 진행
-  // 마지막 promise만 Map에 보관 — 이전 promise는 reference 끊어져 GC 가능
-  courseLocks.set(courseId, next.catch(() => undefined))
+  const stored = next.catch(() => undefined)
+  courseLocks.set(courseId, stored)
+  // settle 후 자기 자신이 여전히 마지막이면 Map 에서 삭제 — 무한 증가 방지.
+  // 그 사이 새 withCourseLock 호출이 들어왔다면 stored 가 교체되었으므로 삭제 안 함.
+  stored.finally(() => {
+    if (courseLocks.get(courseId) === stored) courseLocks.delete(courseId)
+  })
   return next
 }
 
@@ -604,20 +613,21 @@ app.prepare().then(async () => {
         if (typeof callback === 'function') callback({ error: 'invalid_room_id' })
         return
       }
-      const course = await courseStore.get(courseId)
-      if (!course) {
-        if (typeof callback === 'function') callback({ error: 'room_not_found' })
-        return
-      }
-      if (!validToken(ownerToken) || ownerToken !== course.ownerToken) {
-        if (typeof callback === 'function') callback({ error: 'unauthorized' })
-        return
-      }
-      const trimmed = typeof name === 'string' ? name.trim().substring(0, 60) : ''
-      course.name = trimmed || null
-      await courseStore.save(courseId, course)
-      io.to(courseId).emit('course-renamed', { name: course.name })
-      if (typeof callback === 'function') callback({ ok: true, name: course.name })
+      // lock 안에서 read-modify-write — 동시 join/reaction 과의 race 방지.
+      let result = null
+      await withCourseLock(courseId, async () => {
+        const course = await courseStore.get(courseId)
+        if (!course) { result = { error: 'room_not_found' }; return }
+        if (!validToken(ownerToken) || ownerToken !== course.ownerToken) {
+          result = { error: 'unauthorized' }; return
+        }
+        const trimmed = typeof name === 'string' ? name.trim().substring(0, 60) : ''
+        course.name = trimmed || null
+        await courseStore.save(courseId, course)
+        result = { ok: true, name: course.name }
+      })
+      if (result?.ok) io.to(courseId).emit('course-renamed', { name: result.name })
+      if (typeof callback === 'function') callback(result)
     })
 
     // 회차 삭제 (교수자) — archivedSessions에서 영구 제거
@@ -630,14 +640,21 @@ app.prepare().then(async () => {
       }
       if (!rateLimit(socket, 'delete-archived', 2000)) return
       if (typeof sessionId !== 'string' || !sessionId) return
-      const course = await courseStore.get(cid)
-      if (!course?.archivedSessions) return
-      const before = course.archivedSessions.length
-      course.archivedSessions = course.archivedSessions.filter(s => s.id !== sessionId)
-      if (course.archivedSessions.length === before) return
-      await courseStore.save(cid, course)
-      io.to(cid).emit('archived-deleted', { sessionId })
-      log('info', 'archived_deleted', { sid: socket.id, courseId: cid, sessionId })
+      // lock 안에서 처리 — 동시 학생 join 의 save 가 archived 변경을 덮어쓰지 않게.
+      let deleted = false
+      await withCourseLock(cid, async () => {
+        const course = await courseStore.get(cid)
+        if (!course?.archivedSessions) return
+        const before = course.archivedSessions.length
+        course.archivedSessions = course.archivedSessions.filter(s => s.id !== sessionId)
+        if (course.archivedSessions.length === before) return
+        await courseStore.save(cid, course)
+        deleted = true
+      })
+      if (deleted) {
+        io.to(cid).emit('archived-deleted', { sessionId })
+        log('info', 'archived_deleted', { sid: socket.id, courseId: cid, sessionId })
+      }
     })
 
     // 명시적 시작 (교수자)
@@ -673,23 +690,29 @@ app.prepare().then(async () => {
       if (!validCourseId(cid)) return
       if (socket.data.profOf !== cid) return
       if (!rateLimit(socket, 'session-end', 2000)) return
-      const course = await courseStore.get(cid)
-      if (!course?.currentSession || course.currentSession.endedAt) return
-      const now = Date.now()
-      course.currentSession.lastSeen = now
-      course.currentSession.endedAt = now
-      forceSnapshot(course.currentSession, now)
-      const summary = summarizeSession(course.currentSession)
-      course.archivedSessions = course.archivedSessions || []
-      course.archivedSessions.push(summary)
-      if (course.archivedSessions.length > ARCHIVE_LIMIT) {
-        course.archivedSessions = course.archivedSessions.slice(-ARCHIVE_LIMIT)
+      // lock 안에서 archive — 동시 학생 join 의 save 가 새로 추가된 학생을 보존되도록.
+      let endedSessionId = null
+      await withCourseLock(cid, async () => {
+        const course = await courseStore.get(cid)
+        if (!course?.currentSession || course.currentSession.endedAt) return
+        const now = Date.now()
+        course.currentSession.lastSeen = now
+        course.currentSession.endedAt = now
+        forceSnapshot(course.currentSession, now)
+        const summary = summarizeSession(course.currentSession)
+        course.archivedSessions = course.archivedSessions || []
+        course.archivedSessions.push(summary)
+        if (course.archivedSessions.length > ARCHIVE_LIMIT) {
+          course.archivedSessions = course.archivedSessions.slice(-ARCHIVE_LIMIT)
+        }
+        endedSessionId = course.currentSession.id
+        course.currentSession = null
+        await courseStore.save(cid, course)
+      })
+      if (endedSessionId) {
+        io.to(cid).emit('session-ended', { sessionId: endedSessionId, explicit: true })
+        log('info', 'session_ended_explicit', { sid: socket.id, courseId: cid, sessionId: endedSessionId })
       }
-      const endedSessionId = course.currentSession.id
-      course.currentSession = null
-      await courseStore.save(cid, course)
-      io.to(cid).emit('session-ended', { sessionId: endedSessionId, explicit: true })
-      log('info', 'session_ended_explicit', { sid: socket.id, courseId: cid, sessionId: endedSessionId })
     })
 
     // disconnect — 학생: 해당 socket을 students[studentId].sockets에서 제거. sockets 비면 학생 삭제.
