@@ -1,6 +1,6 @@
 {
   "name": "classbridge-desktop",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "ClassBridge 교수자 위젯",
   "author": "ClassBridge",
   "main": "main.js",
@@ -32,13 +32,12 @@
         {
           "target": "dmg",
           "arch": [
-            "x64",
-            "arm64"
+            "x64"
           ]
         }
       ],
       "icon": "build/icon.png",
-      "identity": "-",
+      "identity": null,
       "type": "distribution"
     },
     "win": {
