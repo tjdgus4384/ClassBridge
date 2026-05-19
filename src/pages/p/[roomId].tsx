@@ -74,6 +74,9 @@ export default function ProfessorDashboard() {
   const [studentCount, setStudentCount] = useState(0)
   const [questionsOpen, setQuestionsOpen] = useState(false)
   const [newQuestionPulse, setNewQuestionPulse] = useState(false)
+  // 빨간 뱃지 카운트용 — 패널 닫혀있을 때 도착한 질문 id 집합. 패널 열면 클리어.
+  // 질문 자체는 dismissed 되지 않고 그대로 보임. "확인했다 = 뱃지 0" 으로 분리.
+  const [unreadIds, setUnreadIds] = useState<Set<string>>(new Set())
   const [archived, setArchived] = useState<ArchivedSession[]>([])
   const [bootstrapped, setBootstrapped] = useState(false) // 첫 room-state 도착 여부
   const [historyOpen, setHistoryOpen] = useState(true) // 검토 모드에선 기본 펼침
@@ -154,7 +157,10 @@ export default function ProfessorDashboard() {
     }) => {
       setAuthError(null)
       setReactions(data.reactions)
-      setQuestions(data.questions)
+      // 서버는 push 순서(오래된 → 최신)로 보냄. 화면엔 최신 위.
+      setQuestions([...data.questions].reverse())
+      // reconnect/페이지 새로고침으로 이전 질문들이 들어옴 — 이미 봤다고 가정해서 unread 0.
+      setUnreadIds(new Set())
       setStudentCount(data.studentCount)
       setStatus('connected')
       if (typeof data.isLive === 'boolean') setIsLive(data.isLive)
@@ -173,6 +179,7 @@ export default function ProfessorDashboard() {
       setStarting(false)
       setReactions({ green: 0, yellow: 0, red: 0, none: 0 })
       setQuestions([])
+      setUnreadIds(new Set())
       setStudentCount(0)
     }
     const onSessionEnded = () => {
@@ -190,8 +197,16 @@ export default function ProfessorDashboard() {
     }
 
     const onNewQuestion = (data: { question: Question; questionCount: number }) => {
-      setQuestions((prev) => [...prev, data.question])
-      if (!questionsOpen) {
+      // 최신이 위 — prepend
+      setQuestions((prev) => [data.question, ...prev])
+      // "실제로 화면에 보이는가" = 풀 모드 + 패널 open. 미니거나 패널 닫혀있으면 안 보이는 것과 동일.
+      const visible = !compact && questionsOpen
+      if (!visible) {
+        setUnreadIds((prev) => {
+          const next = new Set(prev)
+          next.add(data.question.id)
+          return next
+        })
         setNewQuestionPulse(true)
         setTimeout(() => setNewQuestionPulse(false), 1500)
       }
@@ -199,6 +214,17 @@ export default function ProfessorDashboard() {
 
     const onQuestionDismissed = ({ questionId }: { questionId: string }) => {
       setQuestions((prev) => prev.filter((q) => q.id !== questionId))
+      setUnreadIds((prev) => {
+        if (!prev.has(questionId)) return prev
+        const next = new Set(prev)
+        next.delete(questionId)
+        return next
+      })
+    }
+
+    const onAllQuestionsDismissed = () => {
+      setQuestions([])
+      setUnreadIds(new Set())
     }
 
     const onStudentCount = (count: number) => setStudentCount(count)
@@ -211,6 +237,7 @@ export default function ProfessorDashboard() {
     socket.on('reaction-update', onReactionUpdate)
     socket.on('new-question', onNewQuestion)
     socket.on('question-dismissed', onQuestionDismissed)
+    socket.on('all-questions-dismissed', onAllQuestionsDismissed)
     socket.on('student-count', onStudentCount)
     socket.on('session-started', onSessionStarted)
     socket.on('session-ended', onSessionEnded)
@@ -227,12 +254,21 @@ export default function ProfessorDashboard() {
       socket.off('reaction-update', onReactionUpdate)
       socket.off('new-question', onNewQuestion)
       socket.off('question-dismissed', onQuestionDismissed)
+      socket.off('all-questions-dismissed', onAllQuestionsDismissed)
       socket.off('student-count', onStudentCount)
       socket.off('session-started', onSessionStarted)
       socket.off('session-ended', onSessionEnded)
       socket.off('archived-deleted', onArchivedDeleted)
     }
-  }, [roomId, questionsOpen])
+  }, [roomId, questionsOpen, compact])
+
+  // 풀 모드 + 패널 open 상태가 되면 unread 자동 클리어.
+  // 미니에서 풀로 돌아왔을 때 (패널은 이전부터 open 상태)도 동일하게 처리.
+  useEffect(() => {
+    if (!compact && questionsOpen && unreadIds.size > 0) {
+      setUnreadIds(new Set())
+    }
+  }, [compact, questionsOpen, unreadIds.size])
 
   // ── Electron flush 핸들러 — 위젯 닫기/Cmd+Q 시 세션 종료 신호 emit ────
   useEffect(() => {
@@ -252,6 +288,21 @@ export default function ProfessorDashboard() {
   const dismissQuestion = useCallback((questionId: string) => {
     socketRef.current.emit('dismiss-question', { roomId, questionId })
   }, [roomId])
+
+  // 전체 삭제 — 서버에서 한 트랜잭션으로 처리 (개별 N개 dispatch 하면 rate limit 에 걸려 N-1개 drop 됨)
+  const dismissAllQuestions = useCallback(() => {
+    socketRef.current.emit('dismiss-all-questions', { roomId, courseId: roomId })
+  }, [roomId])
+
+  // 질문 패널 토글 — 열 때 unread 다 비움 (= 빨간 뱃지 사라짐).
+  // 질문 자체는 사라지지 않음. "확인했다 = 뱃지 0".
+  const toggleQuestionsPanel = useCallback(() => {
+    setQuestionsOpen((prev) => {
+      const next = !prev
+      if (next) setUnreadIds(new Set())
+      return next
+    })
+  }, [])
 
   const deleteArchivedSession = useCallback((s: ArchivedSession, num: number) => {
     const dur = formatDuration(s.startedAt, s.endedAt)
@@ -457,7 +508,11 @@ export default function ProfessorDashboard() {
 
               {/* 질문 버튼 */}
               <button
-                onClick={() => { handleToggleCompact(false); setQuestionsOpen(true) }}
+                onClick={() => {
+                  handleToggleCompact(false)
+                  setQuestionsOpen(true)
+                  setUnreadIds(new Set())   // 미니에서 클릭으로 열어도 "확인했다" 로 처리
+                }}
                 className={`relative flex items-center justify-center w-7 h-7 rounded-full transition-colors
                   ${questions.length > 0 ? 'text-white/70 hover:text-white' : 'text-white/25 hover:text-white/50'}
                   ${newQuestionPulse ? 'animate-bounce' : ''}`}
@@ -468,11 +523,16 @@ export default function ProfessorDashboard() {
                   <path strokeLinecap="round" strokeLinejoin="round"
                     d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
                 </svg>
-                {questions.length > 0 && (
+                {/* 미니 뱃지: unread 있으면 빨강, 없으면 회색으로 총 개수 (질문 있을 때만) */}
+                {unreadIds.size > 0 ? (
                   <span className="absolute -top-1 -right-1 bg-rose-500 text-white text-[9px] font-bold rounded-full min-w-[16px] h-4 flex items-center justify-center px-1 leading-none">
+                    {unreadIds.size > 9 ? '9+' : unreadIds.size}
+                  </span>
+                ) : questions.length > 0 ? (
+                  <span className="absolute -top-1 -right-1 bg-white/20 text-white/70 text-[9px] font-bold rounded-full min-w-[16px] h-4 flex items-center justify-center px-1 leading-none">
                     {questions.length > 9 ? '9+' : questions.length}
                   </span>
-                )}
+                ) : null}
               </button>
 
               {/* 확장 버튼 */}
@@ -660,7 +720,7 @@ export default function ProfessorDashboard() {
           <section>
             <div className="flex items-center justify-between mb-3">
               <button
-                onClick={() => setQuestionsOpen((v) => !v)}
+                onClick={toggleQuestionsPanel}
                 className="flex items-center gap-2 group"
               >
                 <h2 className="text-white/70 text-sm font-semibold tracking-tight group-hover:text-white transition-colors">
@@ -668,8 +728,15 @@ export default function ProfessorDashboard() {
                 </h2>
                 <div className={`flex items-center gap-1.5 transition-all ${newQuestionPulse ? 'scale-110' : ''}`}>
                   <span className="text-lg">💬</span>
-                  {questions.length > 0 && (
+                  {/* 빨간 뱃지: 안 읽은 질문만 카운트. 패널 열면 0이 되어 사라짐. */}
+                  {unreadIds.size > 0 && (
                     <span className="bg-rose-500 text-white text-xs rounded-full px-2 py-0.5 font-mono font-semibold min-w-[22px] text-center">
+                      {unreadIds.size}
+                    </span>
+                  )}
+                  {/* 패널 닫혀있고 unread 0이지만 전체 질문은 있을 때 — 회색 뱃지로 총 개수 */}
+                  {!questionsOpen && unreadIds.size === 0 && questions.length > 0 && (
+                    <span className="bg-white/15 text-white/70 text-xs rounded-full px-2 py-0.5 font-mono font-semibold min-w-[22px] text-center">
                       {questions.length}
                     </span>
                   )}
@@ -680,7 +747,7 @@ export default function ProfessorDashboard() {
               </button>
               {questions.length > 0 && questionsOpen && (
                 <button
-                  onClick={() => questions.forEach((q) => dismissQuestion(q.id))}
+                  onClick={dismissAllQuestions}
                   className="text-white/50 hover:text-white text-sm px-2 py-1 rounded-md hover:bg-white/5 transition-all"
                 >
                   전체 삭제

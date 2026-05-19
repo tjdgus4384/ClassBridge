@@ -272,6 +272,39 @@ app.prepare().then(async () => {
     log('info', 'memory_mode')
   }
 
+  // ─── Boot cleanup ────────────────────────────────────────────────────────
+  // 이전 server 인스턴스의 socket id 들은 모두 죽었음 (이 인스턴스는 지금 막 시작).
+  // crash 후 재기동, 또는 graceful shutdown 이 SIGTERM 안에 못 끝낸 경우의 안전망:
+  // 모든 라이브 세션의 professorSockets 를 비우고 lastSeen 을 now 로 reset.
+  // 결과: 위젯 살아있던 교수자는 자동 reconnect 하면서 1h 안에 다시 등록됨 → 정상.
+  //       위젯도 같이 죽었다면 1h 후 archive (정상 grace 동작).
+  if (redis) {
+    try {
+      let cursor = '0', cleared = 0
+      const now = Date.now()
+      do {
+        const result = await redis.scan(cursor, { MATCH: 'course:*', COUNT: 100 })
+        cursor = result.cursor
+        for (const key of result.keys) {
+          const raw = await redis.get(key)
+          if (!raw) continue
+          try {
+            const c = JSON.parse(raw)
+            if (c?.currentSession?.professorSockets?.length) {
+              c.currentSession.professorSockets = []
+              c.currentSession.lastSeen = now
+              await redis.setEx(key, COURSE_TTL, JSON.stringify(c))
+              cleared++
+            }
+          } catch {}
+        }
+      } while (cursor !== '0')
+      if (cleared) log('info', 'boot_cleanup', { coursesCleared: cleared })
+    } catch (e) {
+      log('warn', 'boot_cleanup_failed', { msg: e.message })
+    }
+  }
+
   const memCourses = new Map()
   const courseStore = {
     async get(courseId) {
@@ -601,6 +634,34 @@ app.prepare().then(async () => {
         dismissed = true
       })
       if (dismissed) io.to(cid).emit('question-dismissed', { questionId })
+    })
+
+    // 전체 질문 dismiss (교수자) — 한 트랜잭션에 처리. 개별 dismiss N개 emit 하면 rate limit 에 걸려서 통과 못함.
+    socket.on('dismiss-all-questions', async ({ roomId, courseId } = {}) => {
+      const cid = courseId || roomId
+      if (!validCourseId(cid)) return
+      if (socket.data.profOf !== cid) return
+      if (!rateLimit(socket, 'dismiss-all', 2000)) return
+
+      let any = false
+      await withCourseLock(cid, async () => {
+        const course = await courseStore.get(cid)
+        if (!course?.currentSession?.questions?.length) return
+        const now = Date.now()
+        let changed = false
+        course.currentSession.questions = course.currentSession.questions.map(q => {
+          if (q.dismissed) return q
+          changed = true
+          return { ...q, dismissed: true, dismissedAt: now }
+        })
+        if (!changed) return
+        await courseStore.save(cid, course)
+        any = true
+      })
+      if (any) {
+        io.to(cid).emit('all-questions-dismissed')
+        log('info', 'dismiss_all_questions', { sid: socket.id, courseId: cid })
+      }
     })
 
     // 강의 이름 변경 (교수자)
