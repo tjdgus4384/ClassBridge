@@ -39,6 +39,27 @@ function flushSession(kind, onDone) {
 }
 
 // ── 랜딩 창 (세션 생성용) ──────────────────────────────────────────────────
+// 첫 실행 시 macOS 보안 검사 + Fly 페이지 fetch 가 합쳐서 5-10초 걸려서
+// 사용자에겐 빈 화면이 한참 뜨는 것처럼 보임. 즉시 data: URL splash 띄우고 그 뒤에 실제 페이지 로드.
+const SPLASH_HTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>ClassBridge</title>
+<style>
+  html,body{margin:0;padding:0;background:#0a0a0a;color:#fff;height:100vh;overflow:hidden;
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    -webkit-app-region:drag;-webkit-user-select:none;}
+  body{display:flex;align-items:center;justify-content:center;}
+  .c{text-align:center;}
+  .name{font-size:30px;font-weight:700;letter-spacing:-0.02em;}
+  .sub{font-size:13px;color:rgba(255,255,255,0.45);margin-top:12px;}
+  .d{display:inline-block;width:5px;height:5px;background:rgba(255,255,255,0.5);
+    border-radius:50%;margin:0 2px;animation:b 1.2s infinite ease-in-out;}
+  .d:nth-child(2){animation-delay:0.2s;}.d:nth-child(3){animation-delay:0.4s;}
+  @keyframes b{0%,80%,100%{opacity:0.15;transform:translateY(0);}40%{opacity:1;transform:translateY(-2px);}}
+</style></head><body>
+<div class="c">
+  <div class="name">ClassBridge</div>
+  <div class="sub">시작하는 중<span class="d"></span><span class="d"></span><span class="d"></span></div>
+</div></body></html>`
+
 function createLandingWindow() {
   mainWindow = new BrowserWindow({
     width: 440,
@@ -46,17 +67,28 @@ function createLandingWindow() {
     resizable: false,
     titleBarStyle: 'hiddenInset',
     backgroundColor: '#0a0a0a',
-    show: false,                // 콘텐츠 준비될 때까지 숨김 → 깜빡임 제거
+    show: false,                // splash 가 paint 되는 순간 ready-to-show 발화 → 그때 보임
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
-      sandbox: true,           // Chromium sandbox 안에서 renderer 실행
-      backgroundThrottling: false,   // unfocused 상태에서도 setInterval/setTimeout 정상 속도 — socket heartbeat 보호
+      sandbox: true,
+      backgroundThrottling: false,
     },
   })
-  mainWindow.loadURL(SERVER_URL)
+
+  // 1단계: 즉시 보이는 splash — data: URL 이라 네트워크 0, 렌더 ~ms 단위.
+  mainWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(SPLASH_HTML))
   mainWindow.once('ready-to-show', () => mainWindow.show())
+
+  // 2단계: splash 가 화면에 박힌 직후 (~100ms) 실제 페이지로 전환.
+  // 사용자 시점: 클릭 → splash 즉시 → 잠시 후 실제 콘텐츠.
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.loadURL(SERVER_URL)
+    }
+  }, 100)
+
   mainWindow.on('closed', () => { mainWindow = null })
 }
 

@@ -278,30 +278,38 @@ app.prepare().then(async () => {
   // 모든 라이브 세션의 professorSockets 를 비우고 lastSeen 을 now 로 reset.
   // 결과: 위젯 살아있던 교수자는 자동 reconnect 하면서 1h 안에 다시 등록됨 → 정상.
   //       위젯도 같이 죽었다면 1h 후 archive (정상 grace 동작).
+  //
+  // scanIterator 사용 — 직접 cursor 관리 시 node-redis v4 의 cursor 가 number 로 반환되어
+  // `cursor !== '0'` 같은 strict 비교가 무한루프 되는 함정 회피.
+  // 안전망: 15초 timeout 으로 bootCleanup 이 server listen 까지 막지 않게 보장.
   if (redis) {
-    try {
-      let cursor = '0', cleared = 0
+    const cleanupPromise = (async () => {
+      let cleared = 0
       const now = Date.now()
-      do {
-        const result = await redis.scan(cursor, { MATCH: 'course:*', COUNT: 100 })
-        cursor = result.cursor
-        for (const key of result.keys) {
-          const raw = await redis.get(key)
-          if (!raw) continue
-          try {
-            const c = JSON.parse(raw)
-            if (c?.currentSession?.professorSockets?.length) {
-              c.currentSession.professorSockets = []
-              c.currentSession.lastSeen = now
-              await redis.setEx(key, COURSE_TTL, JSON.stringify(c))
-              cleared++
-            }
-          } catch {}
-        }
-      } while (cursor !== '0')
+      for await (const key of redis.scanIterator({ MATCH: 'course:*', COUNT: 100 })) {
+        const raw = await redis.get(key)
+        if (!raw) continue
+        try {
+          const c = JSON.parse(raw)
+          if (c?.currentSession?.professorSockets?.length) {
+            c.currentSession.professorSockets = []
+            c.currentSession.lastSeen = now
+            await redis.setEx(key, COURSE_TTL, JSON.stringify(c))
+            cleared++
+          }
+        } catch {}
+      }
       if (cleared) log('info', 'boot_cleanup', { coursesCleared: cleared })
+    })()
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('boot_cleanup_timeout_15s')), 15_000)
+    )
+    try {
+      await Promise.race([cleanupPromise, timeoutPromise])
     } catch (e) {
       log('warn', 'boot_cleanup_failed', { msg: e.message })
+      // timeout 이어도 cleanupPromise 는 background 에서 계속 진행 — 어쩔 수 없음.
+      // 그래도 listen 까지 진입은 보장됨.
     }
   }
 
