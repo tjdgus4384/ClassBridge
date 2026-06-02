@@ -63,6 +63,7 @@ function freshDaily() {
     coursesCreated: 0, sessionsStarted: 0, sessionsEnded: 0,
     studentJoins: 0, reactions: 0, questions: 0,
     errors: 0, warnings: 0,
+    uniqueStudents: 0,    // Redis SET 으로 dedupe 된 학생 디바이스 수 (오늘 한정).
   }
 }
 const metrics = {
@@ -73,13 +74,75 @@ const metrics = {
   recentLogs: [],   // 최근 warn/error 100개
 }
 function bumpDaily(key) {
-  if (metrics.daily.dateKey !== todayKstKey()) metrics.daily = freshDaily()
+  const todayKey = todayKstKey()
+  if (metrics.daily.dateKey !== todayKey) {
+    // 자정 롤오버 — 직전 날짜 최종 스냅샷을 Redis 에 한 번 더 저장 (마지막 저장 이후 이벤트 보존).
+    // fire-and-forget — 실패해도 새 날짜 진입은 막지 않음.
+    const prev = metrics.daily
+    persistDaily(prev).catch(() => {})
+    metrics.daily = freshDaily()
+  }
   metrics.daily[key] = (metrics.daily[key] || 0) + 1
 }
 function bumpLifetime(key) {
   metrics.lifetime[key] = (metrics.lifetime[key] || 0) + 1
 }
 function bumpBoth(key) { bumpDaily(key); bumpLifetime(key) }
+
+// ─── 메트릭 영속화 (Redis) ─────────────────────────────────────────────────
+// 서버 재시작/배포 시 카운터 0 리셋 방지 + PoC 발표용 90일 누적 데이터 확보.
+// 매 60초마다 metrics:daily:YYYY-MM-DD 에 현재 일자 카운터 덮어쓰기.
+// 유니크 학생은 metrics:students:YYYY-MM-DD SET 으로 dedupe (32일 TTL).
+let redisClient = null   // Redis 어댑터의 pubClient 와 동일. .then() 안에서 wire 됨.
+const METRICS_DAILY_PREFIX = 'metrics:daily:'
+const METRICS_STUDENTS_PREFIX = 'metrics:students:'
+const METRICS_TTL_S = 60 * 60 * 24 * 400         // ~13개월. 학기 단위 보존.
+const METRICS_STUDENTS_TTL_S = 60 * 60 * 24 * 32  // 32일 — 유니크 학생 SET. 학기 분석엔 daily 스냅샷의 uniqueStudents 사용.
+const METRICS_FLUSH_INTERVAL_MS = 60 * 1000
+
+async function persistDaily(daily) {
+  if (!redisClient) return
+  try {
+    const key = `${METRICS_DAILY_PREFIX}${daily.dateKey}`
+    await redisClient.setEx(key, METRICS_TTL_S, JSON.stringify(daily))
+  } catch (e) {
+    log('warn', 'persist_daily_failed', { msg: e.message, dateKey: daily.dateKey })
+  }
+}
+
+async function loadDailySnapshot(dateKey) {
+  if (!redisClient) return null
+  try {
+    const raw = await redisClient.get(`${METRICS_DAILY_PREFIX}${dateKey}`)
+    if (!raw) return null
+    return JSON.parse(raw)
+  } catch { return null }
+}
+
+// 오늘 기준 과거 N일 (오늘 포함) 의 저장된 일별 스냅샷. 빈 날짜는 생략, 오름차순 정렬.
+async function loadDailyHistory(days = 90) {
+  if (!redisClient) return []
+  const out = []
+  const nowMs = Date.now()
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(nowMs - i * 86400000 + 9 * 60 * 60 * 1000)
+    const dateKey = d.toISOString().slice(0, 10)
+    const snap = await loadDailySnapshot(dateKey)
+    if (snap) out.push(snap)
+  }
+  return out
+}
+
+// studentId 를 오늘 SET 에 add. 새로 추가됐으면 true → 호출자가 uniqueStudents 카운터 +1.
+async function trackUniqueStudent(studentId) {
+  if (!redisClient || !studentId) return false
+  try {
+    const setKey = `${METRICS_STUDENTS_PREFIX}${todayKstKey()}`
+    const added = await redisClient.sAdd(setKey, studentId)
+    if (added) await redisClient.expire(setKey, METRICS_STUDENTS_TTL_S)
+    return added > 0
+  } catch { return false }
+}
 
 // ─── 검증 ─────────────────────────────────────────────────────────────────
 const COURSE_ID_RE = /^[A-Z2-9]{6,8}$/
@@ -301,6 +364,27 @@ app.prepare().then(async () => {
       }
       try {
         const live = await computeLiveSnapshot()
+        // 영속화된 일별 스냅샷 (오늘 포함 과거 90일). 학기/PoC 발표용 누적/추이.
+        const dailyHistory = await loadDailyHistory(90)
+        // 학기 누적 (history 합) — 오늘 in-memory 카운터는 history 의 마지막에 포함됨
+        // (60초 flush 로 거의 일치. 안 일치하면 history 값을 우선).
+        const historyAdj = [...dailyHistory.filter(d => d.dateKey !== metrics.daily.dateKey), metrics.daily]
+        const semesterTotals = historyAdj.reduce((a, d) => ({
+          days: a.days + 1,
+          coursesCreated: a.coursesCreated + (d.coursesCreated || 0),
+          sessionsStarted: a.sessionsStarted + (d.sessionsStarted || 0),
+          sessionsEnded: a.sessionsEnded + (d.sessionsEnded || 0),
+          studentJoins: a.studentJoins + (d.studentJoins || 0),
+          uniqueStudents: a.uniqueStudents + (d.uniqueStudents || 0),
+          reactions: a.reactions + (d.reactions || 0),
+          questions: a.questions + (d.questions || 0),
+          errors: a.errors + (d.errors || 0),
+          warnings: a.warnings + (d.warnings || 0),
+        }), {
+          days: 0, coursesCreated: 0, sessionsStarted: 0, sessionsEnded: 0,
+          studentJoins: 0, uniqueStudents: 0, reactions: 0, questions: 0,
+          errors: 0, warnings: 0,
+        })
         const body = {
           now: Date.now(),
           uptimeMs: Date.now() - metrics.startedAt,
@@ -312,6 +396,8 @@ app.prepare().then(async () => {
           recentLogs: metrics.recentLogs.slice(-50),
           ipConnCount: { unique: ipConnCount.size },
           redisConnected: !!redis,
+          dailyHistory,
+          semesterTotals,
         }
         res.statusCode = 200
         res.setHeader('Content-Type', 'application/json')
@@ -354,6 +440,7 @@ app.prepare().then(async () => {
       await Promise.all([pubClient.connect(), subClient.connect()])
       io.adapter(createAdapter(pubClient, subClient))
       redis = pubClient
+      redisClient = pubClient   // 메트릭 영속화 helper 들이 참조.
       log('info', 'redis_connected')
     } catch (e) {
       log('warn', 'redis_connect_failed', { msg: e.message })
@@ -361,6 +448,39 @@ app.prepare().then(async () => {
   } else {
     log('info', 'memory_mode')
   }
+
+  // ─── 메트릭 복원 — 같은 날 중간에 재시작했어도 오늘 카운터 살림 ─────────
+  if (redisClient) {
+    const todayKey = todayKstKey()
+    const saved = await loadDailySnapshot(todayKey)
+    if (saved && saved.dateKey === todayKey) {
+      metrics.daily = { ...freshDaily(), ...saved }
+      log('info', 'daily_metrics_restored', { dateKey: todayKey })
+    }
+    // uniqueStudents 는 Redis SET cardinality 가 source of truth — fire-and-forget bump 누락 보정.
+    try {
+      const card = await redisClient.sCard(`${METRICS_STUDENTS_PREFIX}${todayKey}`)
+      if (card > (metrics.daily.uniqueStudents || 0)) {
+        metrics.daily.uniqueStudents = card
+      }
+    } catch {}
+  }
+
+  // ─── 60초 주기 일별 카운터 flush + 자정 롤오버 안전망 ─────────────────────
+  // 핵심: 이벤트 없는 조용한 자정에도 직전 날짜의 최종 스냅샷이 저장되도록.
+  setInterval(async () => {
+    try {
+      const todayKey = todayKstKey()
+      if (metrics.daily.dateKey !== todayKey) {
+        // 조용한 시점의 롤오버 — 이전 날짜 최종 저장 후 신 일자 시작.
+        await persistDaily(metrics.daily)
+        metrics.daily = freshDaily()
+      }
+      await persistDaily(metrics.daily)
+    } catch (e) {
+      log('warn', 'periodic_flush_failed', { msg: e.message })
+    }
+  }, METRICS_FLUSH_INTERVAL_MS).unref()
 
   // ─── Boot cleanup ────────────────────────────────────────────────────────
   // 이전 server 인스턴스의 socket id 들은 모두 죽었음 (이 인스턴스는 지금 막 시작).
@@ -717,6 +837,19 @@ app.prepare().then(async () => {
         io.to(courseId).emit('student-count', result.count)
         socket.emit('room-joined', result.roomJoined)
         bumpBoth('studentJoins')
+        // 유니크 학생 dedupe — Redis SET 으로 오늘 한 번도 안 본 디바이스만 카운트.
+        // 비동기지만 응답 차단할 이유 없음 — fire-and-forget 으로 진행.
+        trackUniqueStudent(studentId).then((wasNew) => {
+          if (wasNew) {
+            // bumpDaily 의 롤오버 체크 + count 증가 한 줄.
+            const todayKey = todayKstKey()
+            if (metrics.daily.dateKey !== todayKey) {
+              persistDaily(metrics.daily).catch(() => {})
+              metrics.daily = freshDaily()
+            }
+            metrics.daily.uniqueStudents = (metrics.daily.uniqueStudents || 0) + 1
+          }
+        }).catch(() => {})
         log('info', 'student_joined', { sid: socket.id, courseId, studentId, count: result.count })
       } else if (result.kind === 'student-waiting') {
         socket.emit('session-waiting', result.waiting)

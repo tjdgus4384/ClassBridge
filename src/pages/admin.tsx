@@ -20,6 +20,20 @@ interface DailyCounters {
   sessionsStarted: number
   sessionsEnded: number
   studentJoins: number
+  uniqueStudents?: number
+  reactions: number
+  questions: number
+  errors: number
+  warnings: number
+}
+
+interface SemesterTotals {
+  days: number
+  coursesCreated: number
+  sessionsStarted: number
+  sessionsEnded: number
+  studentJoins: number
+  uniqueStudents: number
   reactions: number
   questions: number
   errors: number
@@ -61,6 +75,8 @@ interface MetricsResp {
   recentLogs: LogEntry[]
   ipConnCount: { unique: number }
   redisConnected: boolean
+  dailyHistory?: DailyCounters[]
+  semesterTotals?: SemesterTotals
 }
 
 const POLL_MS = 5000
@@ -209,7 +225,11 @@ export default function Admin() {
     )
   }
 
-  const { live, daily, lifetime, timeseries, recentLogs, uptimeMs, redisConnected, ipConnCount, serverVersion } = data
+  const {
+    live, daily, lifetime, timeseries, recentLogs, uptimeMs,
+    redisConnected, ipConnCount, serverVersion,
+    dailyHistory, semesterTotals,
+  } = data
 
   return (
     <>
@@ -268,12 +288,41 @@ export default function Admin() {
               <Card label="회차 시작" value={daily.sessionsStarted} accent="white" />
               <Card label="회차 종료" value={daily.sessionsEnded} muted />
               <Card label="학생 join" value={daily.studentJoins} accent="white" />
+              <Card label="유니크 학생" value={daily.uniqueStudents || 0} accent="emerald" />
               <Card label="reaction" value={daily.reactions} muted />
               <Card label="질문" value={daily.questions} accent="white" />
-              <Card label="warn" value={daily.warnings} accent={daily.warnings > 0 ? 'amber' : 'muted'} />
-              <Card label="error" value={daily.errors} accent={daily.errors > 0 ? 'rose' : 'muted'} />
+              <Card label="warn / error" value={(daily.warnings || 0) + (daily.errors || 0)} accent={(daily.errors > 0) ? 'rose' : (daily.warnings > 0 ? 'amber' : 'muted')} />
             </div>
           </section>
+
+          {/* 학기 누적 — 영속화된 일별 스냅샷 합 (PoC 발표 헤드라인용) */}
+          {semesterTotals && (
+            <section>
+              <h2 className="text-white/60 text-xs uppercase tracking-widest mb-3">
+                학기 누적 (지난 {semesterTotals.days || 0}일 데이터 영속화)
+              </h2>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <Card label="강의 (생성)" value={semesterTotals.coursesCreated} accent="emerald" />
+                <Card label="회차 (시작)" value={semesterTotals.sessionsStarted} accent="emerald" />
+                <Card label="유니크 학생" value={semesterTotals.uniqueStudents} accent="emerald" />
+                <Card label="학생 join (총)" value={semesterTotals.studentJoins} muted />
+                <Card label="reaction (총)" value={semesterTotals.reactions} muted />
+                <Card label="질문 (총)" value={semesterTotals.questions} accent="white" />
+                <Card label="warn (총)" value={semesterTotals.warnings} muted />
+                <Card label="error (총)" value={semesterTotals.errors} accent={semesterTotals.errors > 0 ? 'rose' : 'muted'} />
+              </div>
+            </section>
+          )}
+
+          {/* 일별 막대 차트 — 학기 추이 시각화 */}
+          {dailyHistory && dailyHistory.length > 0 && (
+            <section>
+              <h2 className="text-white/60 text-xs uppercase tracking-widest mb-3">
+                일별 추이 (최근 {dailyHistory.length}일 · 영속화된 데이터)
+              </h2>
+              <DailyBarChart history={dailyHistory} />
+            </section>
+          )}
 
           {/* 시계열 차트 */}
           <section>
@@ -431,6 +480,76 @@ function Legend({ color, label }: { color: string; label: string }) {
     <div className="flex items-center gap-1.5">
       <span className={`w-2 h-2 rounded-full ${color}`} />
       <span className="text-white/60">{label}</span>
+    </div>
+  )
+}
+
+// 일별 막대 차트 — 3개 시리즈 (sessionsStarted, uniqueStudents, questions) 누적이 아닌 그룹.
+// 폭 좁아 보여 단순화: 한 번에 한 시리즈만 노출, 토글로 전환.
+function DailyBarChart({ history }: { history: DailyCounters[] }) {
+  const [metric, setMetric] = useState<'uniqueStudents' | 'sessionsStarted' | 'studentJoins' | 'questions' | 'reactions'>('uniqueStudents')
+  const W = 800
+  const H = 180
+  const PAD_T = 14
+  const PAD_B = 22
+  const PAD_L = 4
+  const PAD_R = 4
+
+  const values = history.map(d => (d[metric] as number) || 0)
+  const yMax = Math.max(1, ...values)
+  const innerH = H - PAD_T - PAD_B
+  const innerW = W - PAD_L - PAD_R
+  const barSlot = innerW / Math.max(1, history.length)
+  const barW = Math.max(2, Math.min(28, barSlot - 2))
+
+  const metricLabel: Record<typeof metric, string> = {
+    uniqueStudents: '유니크 학생',
+    sessionsStarted: '회차 시작',
+    studentJoins: '학생 join (중복 포함)',
+    questions: '질문',
+    reactions: 'reaction',
+  }
+
+  return (
+    <div className="bg-white/[0.02] ring-1 ring-white/[0.06] rounded-xl overflow-hidden">
+      <div className="flex items-center gap-1 px-3 pt-3 pb-2 flex-wrap text-xs">
+        {(['uniqueStudents', 'sessionsStarted', 'studentJoins', 'questions', 'reactions'] as const).map(m => (
+          <button
+            key={m}
+            onClick={() => setMetric(m)}
+            className={`px-2.5 py-1 rounded-md transition-colors ${
+              metric === m
+                ? 'bg-white/10 text-white'
+                : 'text-white/50 hover:text-white/80 hover:bg-white/5'
+            }`}
+          >
+            {metricLabel[m]}
+          </button>
+        ))}
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="block w-full" preserveAspectRatio="none" style={{ height: 180 }}>
+        {[0.25, 0.5, 0.75].map(p => (
+          <line key={p} x1={0} x2={W} y1={PAD_T + innerH * (1 - p)} y2={PAD_T + innerH * (1 - p)}
+                stroke="rgba(255,255,255,0.04)" strokeWidth="0.5" strokeDasharray="2 4" />
+        ))}
+        {history.map((d, i) => {
+          const v = (d[metric] as number) || 0
+          const h = (v / yMax) * innerH
+          const x = PAD_L + i * barSlot + (barSlot - barW) / 2
+          const y = PAD_T + innerH - h
+          return (
+            <g key={d.dateKey}>
+              <rect x={x} y={y} width={barW} height={h} fill="#34d399" opacity={v > 0 ? 0.85 : 0.2} rx={1} />
+            </g>
+          )
+        })}
+        <line x1={0} x2={W} y1={PAD_T + innerH} y2={PAD_T + innerH} stroke="rgba(255,255,255,0.08)" strokeWidth="0.5" />
+      </svg>
+      <div className="flex justify-between px-3 py-1.5 text-white/35 text-xs font-mono border-t border-white/[0.04]">
+        <span>{history[0]?.dateKey}</span>
+        <span>peak {yMax}</span>
+        <span>{history[history.length - 1]?.dateKey}</span>
+      </div>
     </div>
   )
 }
