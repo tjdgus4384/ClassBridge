@@ -35,9 +35,51 @@ function ipFromSocket(socket) {
 // ─── 로그 ─────────────────────────────────────────────────────────────────
 function log(level, event, data = {}) {
   try {
-    process.stdout.write(JSON.stringify({ t: new Date().toISOString(), level, event, ...data }) + '\n')
+    const entry = { t: new Date().toISOString(), level, event, ...data }
+    process.stdout.write(JSON.stringify(entry) + '\n')
+    // warn/error 는 admin 페이지에서 빠르게 보기 위해 ring buffer 에도 적재.
+    if (level === 'warn' || level === 'error') {
+      metrics.recentLogs.push(entry)
+      if (metrics.recentLogs.length > 100) metrics.recentLogs.shift()
+      if (level === 'error') bumpDaily('errors')
+      else bumpDaily('warnings')
+    }
   } catch {}
 }
+
+// ─── 메트릭 (admin /admin/metrics + /admin 페이지용) ─────────────────────
+// 베타 운영자가 "지금 라이브 강의 몇 개? 오늘 학생 몇 명 들어왔지?" 를 fly logs 안 뒤지고 보려는 용도.
+// daily 는 KST 자정 기준 롤오버. lifetime 은 서버 부팅 이후 누적.
+// 실시간 live snapshot 은 /admin/metrics 호출 시 courseStore 스캔으로 계산 (cheap, 베타 스케일 OK).
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || null  // 미설정 시 /admin/metrics 비활성화.
+
+function todayKstKey() {
+  const d = new Date(Date.now() + 9 * 60 * 60 * 1000)
+  return d.toISOString().slice(0, 10)
+}
+function freshDaily() {
+  return {
+    dateKey: todayKstKey(),
+    coursesCreated: 0, sessionsStarted: 0, sessionsEnded: 0,
+    studentJoins: 0, reactions: 0, questions: 0,
+    errors: 0, warnings: 0,
+  }
+}
+const metrics = {
+  startedAt: Date.now(),
+  daily: freshDaily(),
+  lifetime: { coursesCreated: 0, sessionsStarted: 0, studentJoins: 0, reactions: 0, questions: 0 },
+  timeseries: [],   // [{ t, liveSessions, studentDevices, profSockets }] — 24h × 5min = 288 points
+  recentLogs: [],   // 최근 warn/error 100개
+}
+function bumpDaily(key) {
+  if (metrics.daily.dateKey !== todayKstKey()) metrics.daily = freshDaily()
+  metrics.daily[key] = (metrics.daily[key] || 0) + 1
+}
+function bumpLifetime(key) {
+  metrics.lifetime[key] = (metrics.lifetime[key] || 0) + 1
+}
+function bumpBoth(key) { bumpDaily(key); bumpLifetime(key) }
 
 // ─── 검증 ─────────────────────────────────────────────────────────────────
 const COURSE_ID_RE = /^[A-Z2-9]{6,8}$/
@@ -234,8 +276,56 @@ function rateLimit(socket, key, minIntervalMs) {
 }
 
 // ─── 부트 ────────────────────────────────────────────────────────────────
+// 토큰 비교 — 길이 다르면 즉시 false, 같으면 timingSafeEqual (timing attack 방어).
+function checkAdminToken(provided) {
+  if (!ADMIN_TOKEN || !provided) return false
+  const a = Buffer.from(ADMIN_TOKEN)
+  const b = Buffer.from(provided)
+  if (a.length !== b.length) return false
+  try { return crypto.timingSafeEqual(a, b) } catch { return false }
+}
+
 app.prepare().then(async () => {
-  const httpServer = createServer((req, res) => handle(req, res, parse(req.url, true)))
+  // /admin/metrics 만 next handler 보다 먼저 intercept. 나머지 경로는 Next.js 로.
+  const httpServer = createServer(async (req, res) => {
+    const parsedUrl = parse(req.url, true)
+    if (parsedUrl.pathname === '/admin/metrics') {
+      const provided = parsedUrl.query?.key ||
+        String(req.headers['authorization'] || '').replace(/^Bearer\s+/i, '')
+      if (!checkAdminToken(String(provided))) {
+        res.statusCode = 401
+        res.setHeader('Content-Type', 'application/json')
+        res.setHeader('Cache-Control', 'no-store')
+        res.end(JSON.stringify({ error: 'unauthorized' }))
+        return
+      }
+      try {
+        const live = await computeLiveSnapshot()
+        const body = {
+          now: Date.now(),
+          uptimeMs: Date.now() - metrics.startedAt,
+          serverVersion: process.env.npm_package_version || null,
+          live,
+          daily: metrics.daily,
+          lifetime: metrics.lifetime,
+          timeseries: metrics.timeseries,
+          recentLogs: metrics.recentLogs.slice(-50),
+          ipConnCount: { unique: ipConnCount.size },
+          redisConnected: !!redis,
+        }
+        res.statusCode = 200
+        res.setHeader('Content-Type', 'application/json')
+        res.setHeader('Cache-Control', 'no-store')
+        res.end(JSON.stringify(body))
+      } catch (e) {
+        res.statusCode = 500
+        res.setHeader('Content-Type', 'application/json')
+        res.end(JSON.stringify({ error: 'internal', msg: e.message }))
+      }
+      return
+    }
+    return handle(req, res, parsedUrl)
+  })
 
   // CORS — production에선 CORS_ORIGIN 명시 필수. 미설정 시 cross-origin 모두 거부.
   let corsOrigins
@@ -346,6 +436,51 @@ app.prepare().then(async () => {
     },
   }
 
+  // ─── 실시간 live snapshot — admin 페이지 호출 시 + 5분 주기 timeseries 샘플 ───
+  // courseStore 전체 스캔. 베타 스케일 (100s of courses) 에선 가벼움.
+  async function computeLiveSnapshot() {
+    let totalCourses = 0
+    let liveSessions = 0
+    let studentDevices = 0
+    let studentSockets = 0
+    let profSockets = 0
+    const visit = (c) => {
+      totalCourses++
+      if (!c?.currentSession || c.currentSession.endedAt) return
+      if (!isSessionLive(c)) return
+      liveSessions++
+      const students = c.currentSession.students || {}
+      for (const sid in students) {
+        studentDevices++
+        studentSockets += (students[sid].sockets || []).length
+      }
+      profSockets += activeProfCount(c.currentSession)
+    }
+    if (redis) {
+      for await (const key of redis.scanIterator({ MATCH: 'course:*', COUNT: 100 })) {
+        const raw = await redis.get(key)
+        if (!raw) continue
+        try { visit(JSON.parse(raw)) } catch {}
+      }
+    } else {
+      for (const c of memCourses.values()) visit(c)
+    }
+    return { totalCourses, liveSessions, studentDevices, studentSockets, profSockets }
+  }
+
+  // 5분 주기 timeseries 샘플 — 24h × 5min = 288 points
+  const TIMESERIES_INTERVAL_MS = 5 * 60 * 1000
+  const TIMESERIES_MAX = 288
+  setInterval(async () => {
+    try {
+      const snap = await computeLiveSnapshot()
+      metrics.timeseries.push({ t: Date.now(), ...snap })
+      if (metrics.timeseries.length > TIMESERIES_MAX) metrics.timeseries.shift()
+    } catch (e) {
+      log('warn', 'timeseries_sample_failed', { msg: e.message })
+    }
+  }, TIMESERIES_INTERVAL_MS).unref()
+
   // ─── 소켓 ─────────────────────────────────────────────────────────────
   io.on('connection', (socket) => {
     // IP당 connection 한도 — 한 IP가 너무 많은 socket을 열면 거부
@@ -382,6 +517,7 @@ app.prepare().then(async () => {
       const course = freshCourse(ownerToken)
       await courseStore.save(courseId, course)
       socket.data.profOf = courseId
+      bumpBoth('coursesCreated')
       log('info', 'course_created', { sid: socket.id, courseId })
       if (typeof callback === 'function') callback({ roomId: courseId, courseId, ownerToken })
     }
@@ -568,6 +704,7 @@ app.prepare().then(async () => {
 
       if (result.expired && result.archivedSession) {
         io.to(courseId).emit('session-ended', { sessionId: result.archivedSession.id })
+        bumpDaily('sessionsEnded')
         log('info', 'session_archived', { courseId, sessionId: result.archivedSession.id })
       }
 
@@ -579,6 +716,7 @@ app.prepare().then(async () => {
         io.to(courseId).emit('reaction-update', { reactions: result.counts })
         io.to(courseId).emit('student-count', result.count)
         socket.emit('room-joined', result.roomJoined)
+        bumpBoth('studentJoins')
         log('info', 'student_joined', { sid: socket.id, courseId, studentId, count: result.count })
       } else if (result.kind === 'student-waiting') {
         socket.emit('session-waiting', result.waiting)
@@ -617,6 +755,7 @@ app.prepare().then(async () => {
       if (newCounts) {
         io.to(cid).emit('reaction-update', { reactions: newCounts })
         socket.emit('my-state', { state: myState })
+        bumpBoth('reactions')
       }
     })
 
@@ -649,6 +788,7 @@ app.prepare().then(async () => {
 
       if (question) {
         io.to(cid).emit('new-question', { question, questionCount })
+        bumpBoth('questions')
       }
     })
 
@@ -779,6 +919,7 @@ app.prepare().then(async () => {
         sessionId: course.currentSession.id,
         startedAt: course.currentSession.startedAt,
       })
+      bumpBoth('sessionsStarted')
       log('info', 'session_started_explicit', { sid: socket.id, courseId: cid, sessionId: course.currentSession.id })
       if (typeof callback === 'function') callback({ ok: true, sessionId: course.currentSession.id })
     })
@@ -810,6 +951,7 @@ app.prepare().then(async () => {
       })
       if (endedSessionId) {
         io.to(cid).emit('session-ended', { sessionId: endedSessionId, explicit: true })
+        bumpDaily('sessionsEnded')
         log('info', 'session_ended_explicit', { sid: socket.id, courseId: cid, sessionId: endedSessionId })
       }
     })
