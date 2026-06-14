@@ -132,15 +132,6 @@ export default function ProfessorDashboard() {
     }
   }, [roomId])
 
-  // 풍선의 ▢ 또는 다른 경로로 popup 모드 탈출 신호 — 모드 상태 동기화.
-  useEffect(() => {
-    if (!isElectron) return
-    const off = window.electronAPI?.onPopupRevert?.(() => {
-      changeWidgetMode('full')
-    })
-    return () => { try { off?.() } catch {} }
-  }, [isElectron, changeWidgetMode])
-
   // widgetMode × isLive 조합 변경 시 Electron 위젯 사이즈 동기화.
   // 라이브 중 popup_only → enterPopupMode, 그 외 (full 복귀 또는 세션 종료) → exitPopupMode.
   useEffect(() => {
@@ -509,23 +500,21 @@ export default function ProfessorDashboard() {
     if (studentUrl) navigator.clipboard.writeText(studentUrl)
   }
 
-  // ── popup_only + 라이브: 위젯창은 48×48 작은 복귀 버튼만. 본문 일체 없음. ──
-  // 클릭 시 widgetMode='full' 로 복귀 → 메인이 위젯 원래 사이즈로 확대 + 떠있던 풍선 정리.
+  // ── popup_only + 라이브: 위젯창은 40×40 작은 복귀 버튼만. 본문 일체 없음. ──
+  // 창 크기 = 버튼 크기 (이중 박스로 안 보이도록). 솔리드 다크, border 없음.
   if (isLive && widgetMode === 'popup_only' && isElectron) {
     return (
       <>
         <Head><title>ClassBridge</title></Head>
-        <div className="w-screen h-screen flex items-center justify-center select-none" style={{ background: 'transparent' }}>
-          <button
-            onClick={() => changeWidgetMode('full')}
-            className="w-11 h-11 rounded-full bg-black/65 backdrop-blur-2xl border border-white/15 text-white/70 hover:text-white hover:bg-black/80 transition-all flex items-center justify-center shadow-lg"
-            title="전체 보기로 복귀"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
-            </svg>
-          </button>
-        </div>
+        <button
+          onClick={() => changeWidgetMode('full')}
+          className="fixed inset-0 w-screen h-screen rounded-full bg-[#0a0a0a] hover:bg-[#1a1a1a] text-white/65 hover:text-white transition-colors flex items-center justify-center select-none"
+          title="전체 보기로 복귀"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2.2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4" />
+          </svg>
+        </button>
       </>
     )
   }
