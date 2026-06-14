@@ -599,21 +599,19 @@ export default function ProfessorDashboard() {
     if (studentUrl) navigator.clipboard.writeText(studentUrl)
   }
 
-  // ── popup_only + 라이브: 위젯창은 44×44 정사각형 (복귀 버튼만) ──
-  // main.js 가 popup 진입 시 setVibrancy('hud') / setBackgroundMaterial('acrylic') 토글.
-  // 그 native frosted material 위에 살짝 어두운 overlay (bg-black/40) 만 얹어서 가독성 확보.
-  // 모서리는 CSS borderRadius — vibrancy 와 함께 둥글게 잘림.
+  // ── popup_only + 라이브: 44×44 솔리드 다크 정사각형, 복귀 버튼만 ──
+  // 위젯 창 자체가 transparent: false + macOS roundedCorners: true → 꼭지점 누출 X.
   if (isLive && widgetMode === 'popup_only' && isElectron) {
     return (
       <>
         <Head><title>ClassBridge</title></Head>
         <div
-          className="w-screen h-screen flex items-center justify-center select-none bg-black/40"
+          className="w-screen h-screen flex items-center justify-center select-none bg-[#0a0a0a]"
           style={{ WebkitAppRegion: 'drag', borderRadius: 12 } as React.CSSProperties}
         >
           <button
             onClick={() => changeWidgetMode('full')}
-            className="flex items-center justify-center w-6 h-6 rounded-md text-white/75 hover:text-white hover:bg-white/10 transition-colors"
+            className="flex items-center justify-center w-6 h-6 rounded-md text-white/70 hover:text-white hover:bg-white/10 transition-colors"
             style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
             title="전체 보기로 복귀"
           >

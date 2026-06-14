@@ -120,11 +120,11 @@ function createWidgetWindow(roomId, ownerToken) {
     x: sw - 480,
     y: 20,
     frame: false,
-    transparent: true,                  // 미니 모드 비침용 (풀/검토는 CSS 거의 불투명)
-    backgroundColor: '#00000000',
+    transparent: false,                 // 솔리드 — 작은 popup 모드 (44×44) 에서 꼭지점이 흰빛으로 새는 문제 회피
+    backgroundColor: '#0a0a0a',         // 솔리드 다크. CSS 의 bg-[#0a0a0a] 와 동일색.
     alwaysOnTop: true,
-    hasShadow: false,                   // macOS 의 시스템 그림자가 흰빛 halo 로 비쳐 이중 박스처럼 보이는 문제 해소
-    roundedCorners: false,              // macOS 디폴트 둥근 모서리 outline 제거 — CSS borderRadius 가 처리
+    hasShadow: false,
+    roundedCorners: true,               // macOS 가 윈도우 모서리 자체를 자연스럽게 잘라줌 (꼭지점 누출 0)
     resizable: true,
     minimizable: false,
     maximizable: false,
@@ -175,7 +175,6 @@ function createWidgetWindow(roomId, ownerToken) {
     isLiveSession = false  // 다음 위젯 진입 시 stale 상태로 confirm 뜨지 않도록
     popupModeActive = false
     savedWidgetBounds = null
-    // vibrancy 는 widget destroy 와 함께 자동 해제됨
     // 말풍선/카드 정리
     if (popupBubbleWindow && !popupBubbleWindow.isDestroyed()) popupBubbleWindow.close()
     if (popupCardWindow && !popupCardWindow.isDestroyed()) popupCardWindow.close()
@@ -300,9 +299,6 @@ ipcMain.on('set-live-size', (_, payload) => {
 // ── popup_only 모드 ─────────────────────────────────────────────────────────
 // 위젯창은 popup 모드 동안 52×52 고정. 말풍선/본문 카드는 별도 BrowserWindow 로 관리.
 // 말풍선/카드 위치: 위젯창 왼쪽 옆에 anchor.
-// popup 위젯 크기 — 정사각형 작게. transparent: true 가 작은 크기에서 작동 안 하는
-// macOS 제약은 popup 진입 시 setVibrancy('hud') 동적 토글로 회피 (Windows 는
-// setBackgroundMaterial('acrylic')). 다른 모드 (mini/full) 는 영향 없음.
 const POPUP_TINY_W = 44
 const POPUP_TINY_H = 44
 const POPUP_GAP = 8                 // 위젯 ↔ 말풍선/카드 간 간격
@@ -371,25 +367,11 @@ function reattachPopupWindowsToWidget() {
   }
 }
 
-// popup 진입 시 macOS 네이티브 frosted material (vibrancy) 또는 Windows acrylic 켜기
-// — 44×44 같은 작은 transparent 윈도우가 솔리드 backdrop 으로 떨어지는 문제 회피.
-// 다른 모드 (mini/full) 는 vibrancy 끈 상태로 기존 CSS bg-black/65 backdrop-blur 그대로 사용.
-function applyPopupVibrancy(on) {
-  if (!widgetWindow || widgetWindow.isDestroyed()) return
-  if (process.platform === 'darwin') {
-    try { widgetWindow.setVibrancy(on ? 'hud' : null) } catch {}
-  } else if (process.platform === 'win32') {
-    try { widgetWindow.setBackgroundMaterial(on ? 'acrylic' : 'none') } catch {}
-  }
-}
-
 ipcMain.on('enter-popup-mode', () => {
-  if (!widgetWindow || widgetWindow.isDestroyed()) return
-  if (widgetClosing) return
+  if (!widgetWindow || widgetWindow.isDestroyed() || widgetClosing) return
   if (popupModeActive) return
   popupModeActive = true
   savedWidgetBounds = widgetWindow.getBounds()
-  applyPopupVibrancy(true)
   setWidgetSizeAnchorRight(POPUP_TINY_W, POPUP_TINY_H)
 })
 
@@ -397,15 +379,14 @@ ipcMain.on('exit-popup-mode', () => {
   if (!widgetWindow || widgetWindow.isDestroyed()) return
   if (!popupModeActive) return
   popupModeActive = false
-  applyPopupVibrancy(false)
-  // 말풍선/카드 정리
   if (popupBubbleWindow && !popupBubbleWindow.isDestroyed()) popupBubbleWindow.close()
   if (popupCardWindow && !popupCardWindow.isDestroyed()) popupCardWindow.close()
   popupBubbleWindow = null
   popupCardWindow = null
-  const targetW = savedWidgetBounds?.width || MINI_W
-  const targetH = savedWidgetBounds?.height || LIVE_TEMP_HEIGHT
-  setWidgetSizeAnchorRight(targetW, targetH)
+  setWidgetSizeAnchorRight(
+    savedWidgetBounds?.width || MINI_W,
+    savedWidgetBounds?.height || LIVE_TEMP_HEIGHT
+  )
   savedWidgetBounds = null
 })
 
