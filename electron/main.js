@@ -288,12 +288,8 @@ ipcMain.on('set-live-size', (_, payload) => {
 // ── popup_only 모드 ─────────────────────────────────────────────────────────
 // 미니 모드와 같은 패턴 — 별도 BrowserWindow 안 만들고 같은 위젯창의 콘텐츠/사이즈만 바꿈.
 // 사이즈는 렌더러가 setPopupSize(w,h) IPC 로 명시. 우측 끝 anchor 유지.
-// 상태:
-//   tiny     — 80×32  (드래그 핸들 + 복귀 버튼)
-//   bubble   — 124×32 (드래그 + 💬+배지 + 복귀)
-//   expanded — 320×130 (드래그 + 카드본문 + 확인 + 복귀)
-const POPUP_TINY_W = 80
-const POPUP_TINY_H = 32
+const POPUP_TINY_W = 56
+const POPUP_TINY_H = 28
 let popupModeActive = false
 let savedWidgetBounds = null
 

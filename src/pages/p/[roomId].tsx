@@ -126,9 +126,10 @@ export default function ProfessorDashboard() {
   }, [roomId])
 
   // popup_only 상태별 widget 창 사이즈 — 미니 모드처럼 명시적 픽셀 값
-  const POPUP_TINY = { w: 80, h: 32 }
-  const POPUP_BUBBLE = { w: 124, h: 32 }
-  const POPUP_EXPANDED = { w: 320, h: 130 }
+  // 작게 유지해서 점프 폭 최소화. 디자인 톤 통일.
+  const POPUP_TINY = { w: 56, h: 28 }
+  const POPUP_BUBBLE = { w: 92, h: 28 }
+  const POPUP_EXPANDED = { w: 240, h: 76 }
 
   // 모드 변경 — localStorage 저장 + Electron 메인 동기화.
   const changeWidgetMode = useCallback((mode: WidgetMode) => {
@@ -551,10 +552,10 @@ export default function ProfessorDashboard() {
 
   // ── popup_only + 라이브: 미니 모드 패턴 — 같은 위젯창 안에 콘텐츠.
   // 상태별 사이즈는 setPopupSize useEffect 가 처리.
-  //   tiny (80×32)     : 드래그 핸들 + 복귀 버튼
-  //   bubble (124×32)  : 드래그 + 💬+카운트 + 복귀
-  //   expanded (320×130): 드래그 헤더 + 카드본문 + "다음/확인" + 작은 복귀
-  // 전체 컨테이너에 WebkitAppRegion: drag, 버튼만 no-drag — 어디든 잡아서 이동 가능.
+  //   tiny (56×28)     : 복귀 버튼 + 빈 드래그 영역 (왼쪽)
+  //   bubble (92×28)   : 💬+카운트 + 복귀
+  //   expanded (240×76): 본문 + 작은 액션 (다음/확인 + 접기 + 복귀)
+  // 전체 컨테이너 WebkitAppRegion: drag, 버튼만 no-drag — 어디든 잡아서 이동.
   if (isLive && widgetMode === 'popup_only' && isElectron) {
     const count = popupQueue.length
     const current = popupQueue[0]
@@ -568,89 +569,84 @@ export default function ProfessorDashboard() {
           className="w-screen h-screen bg-[#0a0a0a] text-white select-none flex"
           style={{
             WebkitAppRegion: 'drag',
-            borderRadius: showExpanded ? 14 : 10,
+            borderRadius: showExpanded ? 12 : 8,
             overflow: 'hidden',
             alignItems: showExpanded ? 'stretch' : 'center',
+            animation: showExpanded ? 'cb-popup-expand-in 180ms cubic-bezier(0.2,0.9,0.3,1) both' : undefined,
           } as React.CSSProperties}
         >
           {showExpanded && current ? (
-            // ── expanded: 카드 본문 + 확인/다음 ──
-            <div className="flex-1 flex flex-col px-3.5 py-2.5">
-              <div className="flex items-center justify-between mb-1.5">
-                <div className="flex items-center gap-1.5 text-[11px] text-white/45 font-semibold tracking-wide">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                  <span>{count > 1 ? `질문 1 / ${count}` : '질문'}</span>
+            // ── expanded: 본문 + 액션 ──
+            <div className="flex-1 flex flex-col px-3 pt-2 pb-2">
+              <div
+                className="flex-1 text-white text-[13px] font-medium leading-snug overflow-hidden"
+                style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' } as React.CSSProperties}
+              >
+                {current.text}
+              </div>
+              <div className="flex items-center justify-between mt-1.5" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+                <div className="flex items-center gap-2 text-[10px] text-white/40 font-mono tabular-nums">
+                  {count > 1 ? `${1} / ${count}` : ''}
                 </div>
-                <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+                <div className="flex items-center gap-0.5">
                   <button
                     onClick={() => setPopupExpanded(false)}
-                    className="text-white/45 hover:text-white/80 w-6 h-6 rounded-md hover:bg-white/8 text-sm flex items-center justify-center"
+                    className="text-white/40 hover:text-white/85 w-5 h-5 rounded hover:bg-white/8 text-xs flex items-center justify-center transition-colors"
                     title="접기"
                   >▾</button>
                   <button
                     onClick={() => changeWidgetMode('full')}
-                    className="text-white/45 hover:text-white/80 w-6 h-6 rounded-md hover:bg-white/8 flex items-center justify-center"
+                    className="text-white/40 hover:text-white/85 w-5 h-5 rounded hover:bg-white/8 flex items-center justify-center transition-colors"
                     title="전체 보기로 복귀"
                   >
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.4} viewBox="0 0 24 24">
+                    <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" strokeWidth={2.6} viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4" />
                     </svg>
                   </button>
+                  <button
+                    onClick={advancePopupQueue}
+                    className="ml-1 bg-white text-black hover:bg-white/90 text-[11px] font-semibold px-2.5 py-1 rounded-md transition-colors"
+                  >
+                    {count > 1 ? '다음' : '확인'}
+                  </button>
                 </div>
-              </div>
-              <div
-                className="flex-1 text-white text-[14px] font-medium leading-snug overflow-hidden"
-                style={{ display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical' } as React.CSSProperties}
-              >
-                {current.text}
-              </div>
-              <div className="flex justify-end mt-2" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-                <button
-                  onClick={advancePopupQueue}
-                  className="bg-white text-black hover:bg-white/90 text-xs font-semibold px-3.5 py-1.5 rounded-md transition-colors"
-                >
-                  {count > 1 ? '다음' : '확인'}
-                </button>
               </div>
             </div>
           ) : (
-            // ── tiny / bubble: 드래그 핸들 + (💬) + 복귀 버튼 ──
-            <>
-              {/* 좌측 드래그 핸들 — 작은 dot 3개 (미니 모드의 ⠿ 와 유사) */}
-              <div className="flex items-center gap-0.5 pl-3 pr-2 h-full">
-                <span className="w-0.5 h-0.5 rounded-full bg-white/30" />
-                <span className="w-0.5 h-0.5 rounded-full bg-white/30" />
-                <span className="w-0.5 h-0.5 rounded-full bg-white/30" />
-              </div>
-              {/* 가운데 질문 버블 — 큐에 질문 있을 때만 */}
+            // ── tiny / bubble: 우측에 (💬) + 복귀, 왼쪽은 빈 드래그 영역 ──
+            <div className="flex-1 flex items-center justify-end gap-0.5 pr-1 h-full">
               {showBubble && (
                 <button
+                  key={`bubble-${count > 0 ? 'on' : 'off'}`}
                   onClick={() => setPopupExpanded(true)}
-                  className="relative flex items-center justify-center w-7 h-7 rounded-full bg-emerald-400/15 hover:bg-emerald-400/25 transition-colors text-base"
-                  style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+                  className="relative flex items-center justify-center w-6 h-6 rounded-md text-white/75 hover:text-white hover:bg-white/8 transition-colors"
+                  style={{
+                    WebkitAppRegion: 'no-drag',
+                    animation: 'cb-popup-bubble-in 200ms cubic-bezier(0.2,0.9,0.3,1) both',
+                  } as React.CSSProperties}
                   title="질문 보기"
                 >
-                  <span aria-hidden>💬</span>
+                  <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H8.83l-4.42 4.42A1 1 0 0 1 3 20.71V6a2 2 0 0 1 1-2z" />
+                  </svg>
                   {count > 1 && (
-                    <span className="absolute -top-1 -right-1 bg-rose-500 text-white text-[9px] font-bold rounded-full min-w-[15px] h-[15px] flex items-center justify-center px-1 leading-none border border-[#0a0a0a]">
+                    <span className="absolute -top-1 -right-1 bg-rose-500 text-white text-[9px] font-bold rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-0.5 leading-none border border-[#0a0a0a]">
                       {count > 99 ? '99+' : count}
                     </span>
                   )}
                 </button>
               )}
-              {/* 우측 채우기 + 복귀 버튼 */}
-              <div className="flex-1" />
               <button
                 onClick={() => changeWidgetMode('full')}
-                className="flex items-center justify-center w-9 h-full text-white/55 hover:text-white hover:bg-white/8 transition-colors"
+                className="flex items-center justify-center w-6 h-6 rounded-md text-white/55 hover:text-white hover:bg-white/8 transition-colors"
                 style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
                 title="전체 보기로 복귀"
               >
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.2} viewBox="0 0 24 24">
+                <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.4} viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4" />
                 </svg>
               </button>
-            </>
+            </div>
           )}
         </div>
       </>
