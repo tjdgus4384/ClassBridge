@@ -330,21 +330,25 @@ button{background:#0a0a0a;border:0;cursor:pointer;padding:0;
   color:rgba(255,255,255,0.85);
   display:flex;align-items:center;justify-content:center;
   opacity:0;
-  transition:opacity 0.2s ease,transform 0.2s ease;
+  transition:opacity 0.4s ease,transform 0.2s ease;
   box-shadow:0 4px 12px rgba(0,0,0,0.3);}
+button.hint{opacity:1;}                /* popup 진입 직후 3초간 위치 hint */
 body:hover button{opacity:1;}
 button:hover{color:#fff;transform:scale(1.05);}
 svg{width:16px;height:16px;}
 </style></head><body>
-<button id="b" title="전체 보기로 복귀">
+<button id="b" class="hint" title="전체 보기로 복귀">
 <svg fill="none" stroke="currentColor" stroke-width="2.4" viewBox="0 0 24 24">
 <path stroke-linecap="round" stroke-linejoin="round" d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4"/>
 </svg>
 </button>
 <script>
-document.getElementById('b').onclick=function(){
+var btn=document.getElementById('b');
+btn.onclick=function(){
   if(window.popupAPI&&window.popupAPI.returnClicked)window.popupAPI.returnClicked();
 };
+// 위치 알림용 hint — 3초 후 클래스 제거 → 그 다음부터는 hover 만 표시
+setTimeout(function(){ btn.classList.remove('hint'); }, 3000);
 </script>
 </body></html>`
 
@@ -367,9 +371,27 @@ function setWidgetSizeAnchorRight(w, h) {
   widgetWindow.setBounds(target)
 }
 
-// 말풍선/카드 위치 — popup 모드면 popupReturnWindow 기준, 아니면 메인 widget 기준.
-// verticalAlign 'center' (말풍선): 콘텐츠 중심을 anchor 중심에 맞춤.
-// verticalAlign 'top' (카드): anchor 상단과 같은 y.
+// 카드 위치 — popup_only 모드는 popupReturnWindow 왼쪽, mini 모드는 widget 아래.
+// (말풍선과 달리 카드는 mini 모드에서도 등장 가능).
+function popupPositionForCard(w, h) {
+  if (popupReturnWindow && !popupReturnWindow.isDestroyed()) {
+    const r = popupReturnWindow.getBounds()
+    return clampToDisplay(r.x - w - POPUP_GAP, r.y, w, h, r)
+  }
+  if (widgetWindow && !widgetWindow.isDestroyed()) {
+    const wb = widgetWindow.getBounds()
+    // mini 위젯 아래에 우측 끝 정렬로 배치
+    const x = wb.x + wb.width - w
+    const y = wb.y + wb.height + POPUP_GAP
+    return clampToDisplay(x, y, w, h, wb)
+  }
+  const d = screen.getPrimaryDisplay().workArea
+  return clampToDisplay(d.x + d.width - w - 60, d.y + 30, w, h, null)
+}
+
+// 말풍선 위치 — popup_only 모드 전용. popupReturnWindow 의 왼쪽 옆.
+// verticalAlign 'center': 콘텐츠 중심을 anchor 중심에 맞춤.
+// verticalAlign 'top': anchor 상단과 같은 y.
 function popupPositionLeftOfWidget(w, h, verticalAlign = 'center') {
   const anchor = (popupReturnWindow && !popupReturnWindow.isDestroyed())
     ? popupReturnWindow
@@ -428,7 +450,7 @@ function reattachPopupWindowsToWidget() {
   }
   if (popupCardWindow && !popupCardWindow.isDestroyed()) {
     const b = popupCardWindow.getBounds()
-    const bounds = popupPositionLeftOfWidget(b.width, b.height, 'top')
+    const bounds = popupPositionForCard(b.width, b.height)
     try { popupCardWindow.setBounds(bounds) } catch {}
   }
 }
@@ -534,7 +556,7 @@ function makeCardHtml(initialText, initialIdx, initialTotal) {
     background:#fff;border-radius:14px;
     box-shadow:0 6px 16px rgba(0,0,0,0.20),0 1px 3px rgba(0,0,0,0.10);
     padding:14px 16px 14px 18px;
-    display:flex;align-items:flex-end;gap:10px;
+    display:flex;align-items:center;gap:10px;
     animation:cb-card-in 0.3s cubic-bezier(0.2,0.9,0.3,1) both;}
   @keyframes cb-card-in{
     from{opacity:0;transform:translateX(18px) scale(0.96);}
@@ -639,7 +661,7 @@ function ensurePopupCardWindow(text, currentIdx, total) {
     popupCardWindow.webContents.send('popup-card-update', { text, currentIdx, total })
     return popupCardWindow
   }
-  const bounds = popupPositionLeftOfWidget(CARD_W, CARD_DEFAULT_H, 'top')
+  const bounds = popupPositionForCard(CARD_W, CARD_DEFAULT_H)
   const win = createTransparentPopupWindow(bounds.width, bounds.height, bounds.x, bounds.y)
   popupCardWindow = win
   win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(makeCardHtml(text, currentIdx, total)))
@@ -695,7 +717,7 @@ ipcMain.on('popup-card-action', () => {
 ipcMain.on('popup-card-resize', (_, payload) => {
   if (!popupCardWindow || popupCardWindow.isDestroyed()) return
   const h = Math.max(60, Math.min(CARD_MAX_H, Math.round(Number(payload && payload.h) || 0)))
-  const bounds = popupPositionLeftOfWidget(CARD_W, h, 'top')
+  const bounds = popupPositionForCard(CARD_W, h)
   try { popupCardWindow.setBounds(bounds) } catch {}
 })
 
