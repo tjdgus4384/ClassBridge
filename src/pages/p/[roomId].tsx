@@ -612,11 +612,11 @@ export default function ProfessorDashboard() {
         >
           <button
             onClick={() => changeWidgetMode('full')}
-            className="flex items-center justify-center w-6 h-6 rounded-md text-white/65 hover:text-white hover:bg-white/8 transition-colors"
+            className="flex items-center justify-center w-7 h-7 rounded-md text-white/65 hover:text-white hover:bg-white/8 transition-colors"
             style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
             title="전체 보기로 복귀"
           >
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.4} viewBox="0 0 24 24">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2.2} viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4" />
             </svg>
           </button>

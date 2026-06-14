@@ -299,8 +299,10 @@ ipcMain.on('set-live-size', (_, payload) => {
 // ── popup_only 모드 ─────────────────────────────────────────────────────────
 // 위젯창은 popup 모드 동안 52×52 고정. 말풍선/본문 카드는 별도 BrowserWindow 로 관리.
 // 말풍선/카드 위치: 위젯창 왼쪽 옆에 anchor.
-const POPUP_TINY_W = 44
-const POPUP_TINY_H = 44
+// 세로/가로 모두 52 — macOS 의 transparent BrowserWindow 최소 크기 제약 (44 아래에선
+// 투명이 작동 안 하고 흰 backdrop 으로 떨어짐) 회피. mini 모드 (MINI_H=52) 와 동일.
+const POPUP_TINY_W = 52
+const POPUP_TINY_H = 52
 const POPUP_GAP = 8                 // 위젯 ↔ 말풍선/카드 간 간격
 const CARD_W = 312                  // 본문 280 + 양옆 16px 그림자 buffer
 const CARD_DEFAULT_H = 140          // 카드 처음 등장 시 임시 높이 — ResizeObserver 가 조정
