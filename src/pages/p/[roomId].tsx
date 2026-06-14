@@ -236,10 +236,13 @@ export default function ProfessorDashboard() {
           }
           return prev + 1
         })
+      } else if (action === 'return-clicked') {
+        // 복귀 버튼 창에서 클릭 → 전체 보기로
+        changeWidgetMode('full')
       }
     })
     return () => { try { off?.() } catch {} }
-  }, [isElectron, popupQueue.length])
+  }, [isElectron, popupQueue.length, changeWidgetMode])
 
   // 위젯 모드면 body를 투명하게 — Electron transparent: true와 같이 동작.
   // 콘텐츠 컨테이너에 CSS bg-* 처리. 미니 모드만 비침, 풀/검토는 거의 불투명.
@@ -599,29 +602,11 @@ export default function ProfessorDashboard() {
     if (studentUrl) navigator.clipboard.writeText(studentUrl)
   }
 
-  // ── popup_only + 라이브: 44×44 솔리드 다크 정사각형, 복귀 버튼만 ──
-  // 위젯 창 자체가 transparent: false + macOS roundedCorners: true → 꼭지점 누출 X.
+  // ── popup_only + 라이브 ──
+  // 메인 위젯 창은 hide 되어 있고, main.js 가 별도 popupReturnWindow (솔리드 44×44) 를
+  // 같은 자리에 띄움. 이 렌더러는 보이지 않으니 null. (race 안전: Head 만 유지.)
   if (isLive && widgetMode === 'popup_only' && isElectron) {
-    return (
-      <>
-        <Head><title>ClassBridge</title></Head>
-        <div
-          className="w-screen h-screen flex items-center justify-center select-none bg-[#0a0a0a]"
-          style={{ WebkitAppRegion: 'drag', borderRadius: 12 } as React.CSSProperties}
-        >
-          <button
-            onClick={() => changeWidgetMode('full')}
-            className="flex items-center justify-center w-6 h-6 rounded-md text-white/70 hover:text-white hover:bg-white/10 transition-colors"
-            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-            title="전체 보기로 복귀"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.4} viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4" />
-            </svg>
-          </button>
-        </div>
-      </>
-    )
+    return <Head><title>ClassBridge</title></Head>
   }
 
   // ── Compact (overlay) mode ──────────────────────────────────────────────

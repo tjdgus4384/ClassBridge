@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('popupAPI', {
   // ── 카드창 → main ──
   cardAction: () => ipcRenderer.send('popup-card-action'),
   requestCardResize: (h) => ipcRenderer.send('popup-card-resize', { h: Math.round(Number(h) || 0) }),
+  // ── 복귀 버튼 창 → main ──
+  returnClicked: () => ipcRenderer.send('popup-return-clicked'),
   // ── main → 말풍선창 (style, count 갱신) ──
   onBubbleUpdate: (cb) => {
     const handler = (_e, data) => cb(data)

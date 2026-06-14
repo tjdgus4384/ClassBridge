@@ -120,11 +120,10 @@ function createWidgetWindow(roomId, ownerToken) {
     x: sw - 480,
     y: 20,
     frame: false,
-    transparent: false,                 // 솔리드 — 작은 popup 모드 (44×44) 에서 꼭지점이 흰빛으로 새는 문제 회피
-    backgroundColor: '#0a0a0a',         // 솔리드 다크. CSS 의 bg-[#0a0a0a] 와 동일색.
+    transparent: true,                  // 미니 모드 backdrop-blur 작동 위해 transparent 유지.
+    backgroundColor: '#00000000',       // popup 모드는 별도 솔리드 윈도우 (popupReturnWindow) 로 분리.
     alwaysOnTop: true,
-    hasShadow: false,
-    roundedCorners: true,               // macOS 가 윈도우 모서리 자체를 자연스럽게 잘라줌 (꼭지점 누출 0)
+    hasShadow: true,                    // 미니/풀 모드 자연스러운 그림자.
     resizable: true,
     minimizable: false,
     maximizable: false,
@@ -175,9 +174,11 @@ function createWidgetWindow(roomId, ownerToken) {
     isLiveSession = false  // 다음 위젯 진입 시 stale 상태로 confirm 뜨지 않도록
     popupModeActive = false
     savedWidgetBounds = null
-    // 말풍선/카드 정리
+    // popup 관련 창 정리
+    if (popupReturnWindow && !popupReturnWindow.isDestroyed()) popupReturnWindow.close()
     if (popupBubbleWindow && !popupBubbleWindow.isDestroyed()) popupBubbleWindow.close()
     if (popupCardWindow && !popupCardWindow.isDestroyed()) popupCardWindow.close()
+    popupReturnWindow = null
     popupBubbleWindow = null
     popupCardWindow = null
     // 위젯 닫혔으면 랜딩으로 복귀 (앱 종료 중이면 skip)
@@ -297,8 +298,11 @@ ipcMain.on('set-live-size', (_, payload) => {
 })
 
 // ── popup_only 모드 ─────────────────────────────────────────────────────────
-// 위젯창은 popup 모드 동안 52×52 고정. 말풍선/본문 카드는 별도 BrowserWindow 로 관리.
-// 말풍선/카드 위치: 위젯창 왼쪽 옆에 anchor.
+// 메인 위젯창은 transparent: true (미니 모드 backdrop-blur 작동).
+// popup 모드 진입 시 메인 위젯은 hide() 하고, 별도 솔리드 44×44 popupReturnWindow 를
+// 그 자리에 띄움. 말풍선/본문 카드도 별도 BrowserWindow.
+// 모든 popup 창의 위치 anchor = 메인 위젯 (popup 모드 동안엔 popupReturnWindow) 의
+// 왼쪽 옆.
 const POPUP_TINY_W = 44
 const POPUP_TINY_H = 44
 const POPUP_GAP = 8                 // 위젯 ↔ 말풍선/카드 간 간격
@@ -309,6 +313,35 @@ let popupModeActive = false
 let savedWidgetBounds = null
 let popupBubbleWindow = null
 let popupCardWindow = null
+let popupReturnWindow = null        // popup 모드 동안만 — 솔리드 44×44 복귀 버튼 창
+
+const POPUP_RETURN_HTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><title></title>
+<style>
+*,*::before,*::after{box-sizing:border-box;}
+html,body{margin:0;padding:0;width:100%;height:100%;background:#0a0a0a;
+  border-radius:12px;overflow:hidden;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  -webkit-user-select:none;user-select:none;
+  display:flex;align-items:center;justify-content:center;
+  -webkit-app-region:drag;}
+button{-webkit-app-region:no-drag;background:transparent;border:0;cursor:pointer;
+  padding:0;width:24px;height:24px;border-radius:6px;
+  color:rgba(255,255,255,0.7);display:flex;align-items:center;justify-content:center;
+  transition:color 0.15s ease,background 0.15s ease;}
+button:hover{color:#fff;background:rgba(255,255,255,0.1);}
+svg{width:14px;height:14px;}
+</style></head><body>
+<button id="b" title="전체 보기로 복귀">
+<svg fill="none" stroke="currentColor" stroke-width="2.4" viewBox="0 0 24 24">
+<path stroke-linecap="round" stroke-linejoin="round" d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4"/>
+</svg>
+</button>
+<script>
+document.getElementById('b').onclick=function(){
+  if(window.popupAPI&&window.popupAPI.returnClicked)window.popupAPI.returnClicked();
+};
+</script>
+</body></html>`
 
 function clampToDisplay(x, y, w, h, refBounds) {
   const display = screen.getDisplayMatching(refBounds || { x, y, width: w, height: h }).workArea
@@ -329,28 +362,58 @@ function setWidgetSizeAnchorRight(w, h) {
   widgetWindow.setBounds(target)
 }
 
-// 말풍선/카드 위치 — 위젯 왼쪽 옆 (우측 끝 = 위젯.x - GAP).
-// verticalAlign 'center' (말풍선): 콘텐츠가 위젯 세로 중심선에 오게.
-// verticalAlign 'top' (카드): 위젯 상단과 같은 y.
+// 말풍선/카드 위치 — popup 모드면 popupReturnWindow 기준, 아니면 메인 widget 기준.
+// verticalAlign 'center' (말풍선): 콘텐츠 중심을 anchor 중심에 맞춤.
+// verticalAlign 'top' (카드): anchor 상단과 같은 y.
 function popupPositionLeftOfWidget(w, h, verticalAlign = 'center') {
-  const widgetBounds = (widgetWindow && !widgetWindow.isDestroyed())
-    ? widgetWindow.getBounds()
-    : null
+  const anchor = (popupReturnWindow && !popupReturnWindow.isDestroyed())
+    ? popupReturnWindow
+    : (widgetWindow && !widgetWindow.isDestroyed() ? widgetWindow : null)
+  const refBounds = anchor ? anchor.getBounds() : null
   let x, y
-  if (widgetBounds) {
-    x = widgetBounds.x - w - POPUP_GAP
-    if (verticalAlign === 'top') {
-      y = widgetBounds.y
-    } else {
-      // center — 콘텐츠 중심을 위젯 중심에 맞춤
-      y = widgetBounds.y + Math.round((widgetBounds.height - h) / 2)
-    }
+  if (refBounds) {
+    x = refBounds.x - w - POPUP_GAP
+    y = verticalAlign === 'top'
+      ? refBounds.y
+      : refBounds.y + Math.round((refBounds.height - h) / 2)
   } else {
     const d = screen.getPrimaryDisplay().workArea
     x = d.x + d.width - w - 60
     y = d.y + 30
   }
-  return clampToDisplay(x, y, w, h, widgetBounds || { x, y, width: w, height: h })
+  return clampToDisplay(x, y, w, h, refBounds || { x, y, width: w, height: h })
+}
+
+// popup 모드의 복귀 버튼 창 — 솔리드 다크 44×44, transparent: false.
+// 메인 widget 의 우측 끝 위치를 그대로 차지하도록 anchor.
+function createPopupReturnWindow() {
+  if (popupReturnWindow && !popupReturnWindow.isDestroyed()) return popupReturnWindow
+  const ref = (widgetWindow && !widgetWindow.isDestroyed())
+    ? widgetWindow.getBounds()
+    : { x: (screen.getPrimaryDisplay().workArea.width - 100), y: 40, width: POPUP_TINY_W, height: POPUP_TINY_H }
+  const x = ref.x + ref.width - POPUP_TINY_W
+  const y = ref.y
+  const bounds = clampToDisplay(x, y, POPUP_TINY_W, POPUP_TINY_H, ref)
+  popupReturnWindow = new BrowserWindow({
+    width: bounds.width, height: bounds.height, x: bounds.x, y: bounds.y,
+    frame: false, transparent: false, backgroundColor: '#0a0a0a',
+    alwaysOnTop: true, hasShadow: false, roundedCorners: true,
+    resizable: false, minimizable: false, maximizable: false,
+    skipTaskbar: true, focusable: false, show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'popup-preload.js'),
+      nodeIntegration: false, contextIsolation: true, sandbox: true,
+      backgroundThrottling: false,
+    },
+  })
+  popupReturnWindow.setAlwaysOnTop(true, 'screen-saver')
+  popupReturnWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(POPUP_RETURN_HTML))
+  popupReturnWindow.once('ready-to-show', () => {
+    if (!popupReturnWindow.isDestroyed()) popupReturnWindow.showInactive()
+  })
+  popupReturnWindow.on('move', () => { if (popupModeActive) reattachPopupWindowsToWidget() })
+  popupReturnWindow.on('closed', () => { popupReturnWindow = null })
+  return popupReturnWindow
 }
 
 // 위젯 이동 시 말풍선/카드 따라가게
@@ -372,22 +435,28 @@ ipcMain.on('enter-popup-mode', () => {
   if (popupModeActive) return
   popupModeActive = true
   savedWidgetBounds = widgetWindow.getBounds()
-  setWidgetSizeAnchorRight(POPUP_TINY_W, POPUP_TINY_H)
+  createPopupReturnWindow()    // 솔리드 복귀 버튼 창 띄움 (메인 widget 자리)
+  widgetWindow.hide()           // 메인 위젯은 hide (renderer state 는 그대로 유지)
 })
 
 ipcMain.on('exit-popup-mode', () => {
-  if (!widgetWindow || widgetWindow.isDestroyed()) return
   if (!popupModeActive) return
   popupModeActive = false
+  if (popupReturnWindow && !popupReturnWindow.isDestroyed()) popupReturnWindow.close()
   if (popupBubbleWindow && !popupBubbleWindow.isDestroyed()) popupBubbleWindow.close()
   if (popupCardWindow && !popupCardWindow.isDestroyed()) popupCardWindow.close()
+  popupReturnWindow = null
   popupBubbleWindow = null
   popupCardWindow = null
-  setWidgetSizeAnchorRight(
-    savedWidgetBounds?.width || MINI_W,
-    savedWidgetBounds?.height || LIVE_TEMP_HEIGHT
-  )
+  if (widgetWindow && !widgetWindow.isDestroyed()) widgetWindow.show()
   savedWidgetBounds = null
+})
+
+// popup 복귀 버튼 창에서 클릭 — 렌더러에 전달 (renderer 가 widgetMode='full' 로 전환)
+ipcMain.on('popup-return-clicked', () => {
+  if (widgetWindow && !widgetWindow.isDestroyed()) {
+    widgetWindow.webContents.send('popup-action', 'return-clicked')
+  }
 })
 
 // ── HTML escape (공용) ──
