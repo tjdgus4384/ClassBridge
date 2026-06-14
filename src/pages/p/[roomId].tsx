@@ -86,16 +86,9 @@ export default function ProfessorDashboard() {
 
   // compact 초기값: ?compact=1 로 직접 접속할 때만 true, 기본은 큰 모드
   const [compact, setCompact] = useState(false)
-  // 라이브 위젯 모드: 'full' (기본, 신호등 바 + 카운트 + 질문 패널) | 'popup_only' (평소엔 빈 화면, 질문 도착 시 팝업만)
-  // 강의별 localStorage 영속. 사용자가 토글 시 변경.
-  type WidgetMode = 'full' | 'popup_only'
-  const [widgetMode, setWidgetMode] = useState<WidgetMode>('full')
-  // popup_only 모드에서 화면에 떠 있는 질문 — 도착 후 10초 뒤 자동 fade-out.
-  const [popupQs, setPopupQs] = useState<Question[]>([])
   const [baseUrl, setBaseUrl] = useState('')
   const ownerTokenRef = useRef<string | null>(null)
   const contentRef = useRef<HTMLDivElement | null>(null)
-  const popupTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
   const socketRef = useRef(getSocket())
 
@@ -116,50 +109,7 @@ export default function ProfessorDashboard() {
         if (t) ownerTokenRef.current = t
       } catch {}
     }
-    // 위젯 모드 복원 — 강의별 기억.
-    if (typeof roomId === 'string') {
-      try {
-        const saved = localStorage.getItem(`cb-widget-mode:${roomId}`)
-        if (saved === 'full' || saved === 'popup_only') setWidgetMode(saved)
-      } catch {}
-    }
   }, [roomId])
-
-  // 컴포넌트 unmount 시 pending popup timers 정리
-  useEffect(() => {
-    return () => {
-      popupTimersRef.current.forEach(clearTimeout)
-      popupTimersRef.current.clear()
-    }
-  }, [])
-
-  // 라이브 종료 시 떠있던 popup 모두 제거
-  useEffect(() => {
-    if (!isLive) {
-      popupTimersRef.current.forEach(clearTimeout)
-      popupTimersRef.current.clear()
-      setPopupQs([])
-    }
-  }, [isLive])
-
-  const changeWidgetMode = useCallback((mode: WidgetMode) => {
-    setWidgetMode(mode)
-    if (typeof roomId === 'string') {
-      try { localStorage.setItem(`cb-widget-mode:${roomId}`, mode) } catch {}
-    }
-    // 모드 바꿀 때 떠있던 popup 도 정리 (full 로 전환하면 풀 패널에서 어차피 다 보임)
-    if (mode === 'full') {
-      popupTimersRef.current.forEach(clearTimeout)
-      popupTimersRef.current.clear()
-      setPopupQs([])
-    }
-  }, [roomId])
-
-  const dismissPopup = useCallback((qid: string) => {
-    const t = popupTimersRef.current.get(qid)
-    if (t) { clearTimeout(t); popupTimersRef.current.delete(qid) }
-    setPopupQs(prev => prev.filter(q => q.id !== qid))
-  }, [])
 
   // 위젯 모드면 body를 투명하게 — Electron transparent: true와 같이 동작.
   // 콘텐츠 컨테이너에 CSS bg-* 처리. 미니 모드만 비침, 풀/검토는 거의 불투명.
@@ -249,17 +199,6 @@ export default function ProfessorDashboard() {
     const onNewQuestion = (data: { question: Question; questionCount: number }) => {
       // 최신이 위 — prepend
       setQuestions((prev) => [data.question, ...prev])
-      // popup_only 모드 — 도착 즉시 화면에 풍선 띄우고 10초 후 자동 소멸.
-      // 라이브 중에만. 풀 모드(full) 와 미니(compact) 는 기존 unread 뱃지 로직 유지.
-      if (widgetMode === 'popup_only' && isLive) {
-        setPopupQs(prev => [...prev, data.question])
-        const t = setTimeout(() => {
-          popupTimersRef.current.delete(data.question.id)
-          setPopupQs(prev => prev.filter(q => q.id !== data.question.id))
-        }, 10_000)
-        popupTimersRef.current.set(data.question.id, t)
-        return
-      }
       // "실제로 화면에 보이는가" = 풀 모드 + 패널 open. 미니거나 패널 닫혀있으면 안 보이는 것과 동일.
       const visible = !compact && questionsOpen
       if (!visible) {
@@ -321,7 +260,7 @@ export default function ProfessorDashboard() {
       socket.off('session-ended', onSessionEnded)
       socket.off('archived-deleted', onArchivedDeleted)
     }
-  }, [roomId, questionsOpen, compact, widgetMode, isLive])
+  }, [roomId, questionsOpen, compact])
 
   // 풀 모드 + 패널 open 상태가 되면 unread 자동 클리어.
   // 미니에서 풀로 돌아왔을 때 (패널은 이전부터 open 상태)도 동일하게 처리.
@@ -693,18 +632,6 @@ export default function ProfessorDashboard() {
                 >
                   종료
                 </button>
-                {/* 위젯 모드 토글 — popup_only ⇄ full. 평소 신호등 바 없이 질문만 팝업으로. */}
-                <button
-                  onClick={() => changeWidgetMode(widgetMode === 'popup_only' ? 'full' : 'popup_only')}
-                  className={`text-xs px-2 py-1 rounded-md border transition-all ${
-                    widgetMode === 'popup_only'
-                      ? 'text-emerald-300 border-emerald-500/50 bg-emerald-500/10 hover:bg-emerald-500/20'
-                      : 'text-white/60 hover:text-white border-white/15 hover:border-white/30'
-                  }`}
-                  title={widgetMode === 'popup_only' ? '질문 팝업만 보이는 중. 클릭하면 전체 보기' : '신호등 바·카운트 다 숨기고 질문 도착 시에만 팝업'}
-                >
-                  {widgetMode === 'popup_only' ? '팝업만 ✓' : '팝업만'}
-                </button>
                 <button
                   onClick={() => handleToggleCompact(true)}
                   className="text-white/60 hover:text-white text-xs px-2 py-1 rounded-md border border-white/15 hover:border-white/30 transition-all"
@@ -746,56 +673,8 @@ export default function ProfessorDashboard() {
             </section>
           )}
 
-          {/* ── popup_only 모드 + 라이브: 신호등 바 / 카운트 / 질문 패널 모두 숨김. 도착한 질문 풍선만 떠 있음. ── */}
-          {isLive && widgetMode === 'popup_only' && (
-            <section>
-              {popupQs.length === 0 ? (
-                <div className="py-6 text-center">
-                  <p className="text-white/40 text-sm">팝업 모드 — 평소엔 비어 있고, 질문 도착 시 풍선이 뜹니다.</p>
-                  <p className="text-white/25 text-xs mt-1">위 헤더에서 "팝업만" 다시 누르면 전체 보기로 돌아갑니다.</p>
-                </div>
-              ) : (
-                <div className="space-y-2.5">
-                  {popupQs.map((q) => (
-                    <div
-                      key={q.id}
-                      className="relative bg-white border border-emerald-400 rounded-2xl px-5 py-4 shadow-2xl shadow-emerald-500/30 animate-[fadeIn_0.25s_ease-out]"
-                      style={{
-                        animation: 'cb-popup-in 0.25s ease-out',
-                      }}
-                    >
-                      <div className="flex items-start gap-3">
-                        <span className="text-2xl leading-none">💬</span>
-                        <p className="flex-1 text-black text-base leading-relaxed font-medium">{q.text}</p>
-                        <button
-                          onClick={() => dismissPopup(q.id)}
-                          className="text-black/40 hover:text-black text-xl leading-none -mt-1"
-                          title="닫기"
-                        >
-                          ×
-                        </button>
-                      </div>
-                      <div className="absolute -bottom-1 left-6 right-6 h-0.5 bg-emerald-400/60 origin-left animate-[shrink_10s_linear]"
-                           style={{ animation: 'cb-popup-shrink 10s linear forwards' }} />
-                    </div>
-                  ))}
-                </div>
-              )}
-              <style jsx>{`
-                @keyframes cb-popup-in {
-                  from { opacity: 0; transform: translateY(-8px) scale(0.96); }
-                  to { opacity: 1; transform: translateY(0) scale(1); }
-                }
-                @keyframes cb-popup-shrink {
-                  from { transform: scaleX(1); }
-                  to { transform: scaleX(0); }
-                }
-              `}</style>
-            </section>
-          )}
-
           {/* ── 라이브 모드 전용: 수업 온도계 + 질문 ── */}
-          {isLive && widgetMode === 'full' && (
+          {isLive && (
           <>
           <section>
             {/* 응답자 비율 막대 */}
