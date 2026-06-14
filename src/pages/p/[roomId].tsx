@@ -96,10 +96,6 @@ export default function ProfessorDashboard() {
   const [popupCardOpen, setPopupCardOpen] = useState(false)
   // 카드창에서 현재 보고 있는 큐 인덱스
   const [popupCardIdx, setPopupCardIdx] = useState(0)
-  // 말풍선 스타일 — 'balloon' | 'pill' | 'bell'. 글로벌 localStorage.
-  type BubbleStyle = 'balloon' | 'pill' | 'bell'
-  const [bubbleStyle, setBubbleStyle] = useState<BubbleStyle>('balloon')
-  const [bubbleStyleMenuOpen, setBubbleStyleMenuOpen] = useState(false)
   const [baseUrl, setBaseUrl] = useState('')
   const ownerTokenRef = useRef<string | null>(null)
   const contentRef = useRef<HTMLDivElement | null>(null)
@@ -132,24 +128,6 @@ export default function ProfessorDashboard() {
     }
   }, [roomId])
 
-  // 말풍선 스타일 복원 (글로벌 localStorage)
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem('cb-bubble-style')
-      if (saved === 'balloon' || saved === 'pill' || saved === 'bell') {
-        setBubbleStyle(saved)
-      }
-    } catch {}
-  }, [])
-
-  // 스타일 드롭다운 — 외부 클릭으로 닫기
-  useEffect(() => {
-    if (!bubbleStyleMenuOpen) return
-    const close = () => setBubbleStyleMenuOpen(false)
-    window.addEventListener('click', close)
-    return () => window.removeEventListener('click', close)
-  }, [bubbleStyleMenuOpen])
-
   // 모드 변경 — localStorage 저장. full 복귀 시 popup 큐/카드 모두 초기화.
   const changeWidgetMode = useCallback((mode: WidgetMode) => {
     setWidgetMode(mode)
@@ -163,11 +141,15 @@ export default function ProfessorDashboard() {
     }
   }, [roomId])
 
-  const changeBubbleStyle = useCallback((style: BubbleStyle) => {
-    setBubbleStyle(style)
-    try { localStorage.setItem('cb-bubble-style', style) } catch {}
-    setBubbleStyleMenuOpen(false)
-  }, [])
+  // 미니 모드의 💬 클릭 → popup 카드 띄움 (위젯 확장 X).
+  // 큐를 현재 questions 로 채우고 첫 질문부터 cycle.
+  const openMiniPopupCard = useCallback(() => {
+    if (questions.length === 0) return
+    setUnreadIds(new Set())
+    setPopupQueue([...questions].reverse())  // oldest first
+    setPopupCardIdx(0)
+    setPopupCardOpen(true)
+  }, [questions])
 
   // widgetMode × isLive 조합 변경 시 Electron 위젯 모드 진입/탈출.
   useEffect(() => {
@@ -190,13 +172,12 @@ export default function ProfessorDashboard() {
     }
   }, [widgetMode, isLive])
 
-  // ── popup_only 별도 창 (말풍선 / 카드) 상태 동기화 ──
-  // 큐 길이 > 0 이고 카드 안 열려 있으면 말풍선 표시.
-  // 큐 길이 > 0 이고 카드 열려 있으면 카드 표시 (현재 idx 의 텍스트).
-  // 큐 비면 둘 다 숨김.
+  // ── popup 별도 창 (말풍선 / 카드) 상태 동기화 ──
+  // 카드: popup_only 모드 + mini 모드 (질문 클릭) 모두에서 표시 가능.
+  // 말풍선: popup_only 모드에서만 (mini 는 위젯에 카운트 표시).
   useEffect(() => {
     if (!isElectron) return
-    if (!(widgetMode === 'popup_only' && isLive)) return
+    if (!isLive) return
     const api = window.electronAPI
     if (!api) return
     const count = popupQueue.length
@@ -208,10 +189,14 @@ export default function ProfessorDashboard() {
     if (popupCardOpen) {
       const idx = Math.min(popupCardIdx, count - 1)
       api.showPopupCard?.({ text: popupQueue[idx]?.text || '', currentIdx: idx, total: count })
+    } else if (widgetMode === 'popup_only') {
+      api.showPopupBubble?.({ count })
     } else {
-      api.showPopupBubble?.({ style: bubbleStyle, count })
+      // mini/full 모드에서 카드 닫힘 — 정리
+      api.hidePopupBubble?.()
+      api.hidePopupCard?.()
     }
-  }, [isElectron, widgetMode, isLive, popupQueue, popupCardOpen, popupCardIdx, bubbleStyle])
+  }, [isElectron, widgetMode, isLive, popupQueue, popupCardOpen, popupCardIdx])
 
   // ── popup 창에서 발생한 액션 listen ──
   useEffect(() => {
@@ -332,15 +317,16 @@ export default function ProfessorDashboard() {
     const onNewQuestion = (data: { question: Question; questionCount: number }) => {
       // 최신이 위 — prepend
       setQuestions((prev) => [data.question, ...prev])
-      // popup_only 모드 + 라이브: 큐에 push (말풍선 또는 카드창이 업데이트됨).
-      if (widgetMode === 'popup_only' && isLive) {
+      // popup_only 모드 라이브 OR 카드창 열려있는 mini 모드: 큐에 push.
+      const shouldEnqueue = (widgetMode === 'popup_only' && isLive) || popupCardOpen
+      if (shouldEnqueue) {
         setPopupQueue((prev) => {
           if (prev.some(q => q.id === data.question.id)) return prev
           if (prev.length >= 30) return [...prev.slice(1), data.question]
           return [...prev, data.question]
         })
-        return
       }
+      if (widgetMode === 'popup_only' && isLive) return  // 위젯 안 보임 — 뱃지 X
       // "실제로 화면에 보이는가" = 풀 모드 + 패널 open. 미니거나 패널 닫혀있으면 안 보이는 것과 동일.
       const visible = !compact && questionsOpen
       if (!visible) {
@@ -402,7 +388,7 @@ export default function ProfessorDashboard() {
       socket.off('session-ended', onSessionEnded)
       socket.off('archived-deleted', onArchivedDeleted)
     }
-  }, [roomId, questionsOpen, compact, widgetMode, isLive, isElectron])
+  }, [roomId, questionsOpen, compact, widgetMode, isLive, isElectron, popupCardOpen])
 
   // 풀 모드 + 패널 open 상태가 되면 unread 자동 클리어.
   // 미니에서 풀로 돌아왔을 때 (패널은 이전부터 open 상태)도 동일하게 처리.
@@ -666,13 +652,9 @@ export default function ProfessorDashboard() {
               {/* 구분선 */}
               <div className="w-px h-5 bg-white/[0.07] mr-3" />
 
-              {/* 질문 버튼 */}
+              {/* 질문 버튼 — popup 카드 띄움 (위젯 확장 X). 질문 없으면 no-op. */}
               <button
-                onClick={() => {
-                  handleToggleCompact(false)
-                  setQuestionsOpen(true)
-                  setUnreadIds(new Set())   // 미니에서 클릭으로 열어도 "확인했다" 로 처리
-                }}
+                onClick={openMiniPopupCard}
                 className={`relative flex items-center justify-center w-7 h-7 rounded-full transition-colors
                   ${questions.length > 0 ? 'text-white/70 hover:text-white' : 'text-white/25 hover:text-white/50'}
                   ${newQuestionPulse ? 'animate-bounce' : ''}`}
@@ -783,42 +765,15 @@ export default function ProfessorDashboard() {
                 >
                   종료
                 </button>
-                {/* 팝업 모드 — 위젯 52×52 로 축소 + 질문은 별도 말풍선/카드 창. ▾ 로 알림 스타일 선택. */}
+                {/* 팝업 모드 — 위젯 hide + 화면 우상단 고정 복귀 버튼 + 질문 알림창 */}
                 {isElectron && (
-                  <div className="relative flex items-stretch">
-                    <button
-                      onClick={() => changeWidgetMode('popup_only')}
-                      className="text-white/60 hover:text-white text-xs pl-2 pr-1.5 py-1 rounded-l-md border-y border-l border-white/15 hover:border-white/30 transition-all"
-                      title="위젯을 52×52 로 축소. 질문 도착 시 별도 말풍선창 등장."
-                    >
-                      팝업
-                    </button>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); setBubbleStyleMenuOpen(o => !o) }}
-                      className="text-white/60 hover:text-white text-xs px-1 py-1 rounded-r-md border border-white/15 hover:border-white/30 transition-all"
-                      title="알림 스타일 선택"
-                    >▾</button>
-                    {bubbleStyleMenuOpen && (
-                      <div className="absolute top-full right-0 mt-1 bg-[#1a1a1a] border border-white/15 rounded-md py-1 shadow-xl z-50 min-w-[110px]" onClick={(e) => e.stopPropagation()}>
-                        {([
-                          { id: 'balloon' as const, label: '말풍선' },
-                          { id: 'pill' as const, label: '알약' },
-                          { id: 'bell' as const, label: '종 흔들림' },
-                        ]).map(opt => (
-                          <button
-                            key={opt.id}
-                            onClick={() => changeBubbleStyle(opt.id)}
-                            className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
-                              bubbleStyle === opt.id ? 'text-white bg-white/10' : 'text-white/70 hover:text-white hover:bg-white/5'
-                            }`}
-                          >
-                            {opt.label}
-                            {bubbleStyle === opt.id && <span className="ml-2 text-white/60">✓</span>}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
+                  <button
+                    onClick={() => changeWidgetMode('popup_only')}
+                    className="text-white/60 hover:text-white text-xs px-2 py-1 rounded-md border border-white/15 hover:border-white/30 transition-all"
+                    title="위젯 숨김. 우상단 복귀 버튼 + 질문 도착 시 알림창."
+                  >
+                    팝업
+                  </button>
                 )}
                 <button
                   onClick={() => handleToggleCompact(true)}

@@ -309,27 +309,32 @@ const POPUP_GAP = 8                 // 위젯 ↔ 말풍선/카드 간 간격
 const CARD_W = 312                  // 본문 280 + 양옆 16px 그림자 buffer
 const CARD_DEFAULT_H = 140          // 카드 처음 등장 시 임시 높이 — ResizeObserver 가 조정
 const CARD_MAX_H = 320
+const BUBBLE_W = 44                 // 말풍선 (흰 원 + Sea Blue 배지) 단일 스타일
+const BUBBLE_H = 44
+const RETURN_MARGIN = 20            // 화면 우상단에서 복귀 버튼 까지의 여백
 let popupModeActive = false
 let savedWidgetBounds = null
 let popupBubbleWindow = null
 let popupCardWindow = null
-let popupReturnWindow = null        // popup 모드 동안만 — 솔리드 44×44 복귀 버튼 창
+let popupReturnWindow = null        // popup 모드 동안만 — 화면 우상단 고정, hover 시 표시
 
 const POPUP_RETURN_HTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><title></title>
 <style>
 *,*::before,*::after{box-sizing:border-box;}
-html,body{margin:0;padding:0;width:100%;height:100%;background:#0a0a0a;
-  border-radius:12px;overflow:hidden;
+html,body{margin:0;padding:0;width:100%;height:100%;background:transparent;
   font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   -webkit-user-select:none;user-select:none;
+  display:flex;align-items:center;justify-content:center;}
+button{background:#0a0a0a;border:0;cursor:pointer;padding:0;
+  width:36px;height:36px;border-radius:50%;
+  color:rgba(255,255,255,0.85);
   display:flex;align-items:center;justify-content:center;
-  -webkit-app-region:drag;}
-button{-webkit-app-region:no-drag;background:transparent;border:0;cursor:pointer;
-  padding:0;width:24px;height:24px;border-radius:6px;
-  color:rgba(255,255,255,0.7);display:flex;align-items:center;justify-content:center;
-  transition:color 0.15s ease,background 0.15s ease;}
-button:hover{color:#fff;background:rgba(255,255,255,0.1);}
-svg{width:14px;height:14px;}
+  opacity:0;
+  transition:opacity 0.2s ease,transform 0.2s ease;
+  box-shadow:0 4px 12px rgba(0,0,0,0.3);}
+body:hover button{opacity:1;}
+button:hover{color:#fff;transform:scale(1.05);}
+svg{width:16px;height:16px;}
 </style></head><body>
 <button id="b" title="전체 보기로 복귀">
 <svg fill="none" stroke="currentColor" stroke-width="2.4" viewBox="0 0 24 24">
@@ -384,21 +389,20 @@ function popupPositionLeftOfWidget(w, h, verticalAlign = 'center') {
   return clampToDisplay(x, y, w, h, refBounds || { x, y, width: w, height: h })
 }
 
-// popup 모드의 복귀 버튼 창 — 솔리드 다크 44×44, transparent: false.
-// 메인 widget 의 우측 끝 위치를 그대로 차지하도록 anchor.
+// popup 모드의 복귀 버튼 창 — 화면 우상단 고정 (workArea 기준 margin 적용).
+// 평소엔 button opacity 0 (안 보임), 윈도우 영역 hover 시 opacity 1.
+// 위치 고정 (movable: false) — 위젯 위치와 무관.
 function createPopupReturnWindow() {
   if (popupReturnWindow && !popupReturnWindow.isDestroyed()) return popupReturnWindow
-  const ref = (widgetWindow && !widgetWindow.isDestroyed())
-    ? widgetWindow.getBounds()
-    : { x: (screen.getPrimaryDisplay().workArea.width - 100), y: 40, width: POPUP_TINY_W, height: POPUP_TINY_H }
-  const x = ref.x + ref.width - POPUP_TINY_W
-  const y = ref.y
-  const bounds = clampToDisplay(x, y, POPUP_TINY_W, POPUP_TINY_H, ref)
+  const display = screen.getPrimaryDisplay().workArea
+  const x = display.x + display.width - POPUP_TINY_W - RETURN_MARGIN
+  const y = display.y + RETURN_MARGIN
   popupReturnWindow = new BrowserWindow({
-    width: bounds.width, height: bounds.height, x: bounds.x, y: bounds.y,
-    frame: false, transparent: false, backgroundColor: '#0a0a0a',
-    alwaysOnTop: true, hasShadow: false, roundedCorners: true,
-    resizable: false, minimizable: false, maximizable: false,
+    width: POPUP_TINY_W, height: POPUP_TINY_H, x, y,
+    frame: false, transparent: true, backgroundColor: '#00000000',
+    alwaysOnTop: true, hasShadow: false,
+    resizable: false, movable: false,
+    minimizable: false, maximizable: false,
     skipTaskbar: true, focusable: false, show: false,
     webPreferences: {
       preload: path.join(__dirname, 'popup-preload.js'),
@@ -411,7 +415,6 @@ function createPopupReturnWindow() {
   popupReturnWindow.once('ready-to-show', () => {
     if (!popupReturnWindow.isDestroyed()) popupReturnWindow.showInactive()
   })
-  popupReturnWindow.on('move', () => { if (popupModeActive) reattachPopupWindowsToWidget() })
   popupReturnWindow.on('closed', () => { popupReturnWindow = null })
   return popupReturnWindow
 }
@@ -466,143 +469,53 @@ function escHtmlPopup(s) {
   )
 }
 
-// ── 말풍선창 — 3가지 스타일 (balloon / pill / bell) inline JS 분기 ──
-// 윈도우 사이즈 = 콘텐츠 + 그림자 buffer (각 변 ~14-16px). 그림자가 잘리지 않게.
-// 콘텐츠는 flex 로 중앙 정렬되며 buffer 영역은 transparent (사용자 입장에선 안 보임).
-const BUBBLE_DIMENSIONS = {
-  balloon: { w: 124, h: 70 },
-  pill:    { w: 168, h: 64 },
-  bell:    { w: 68, h: 68 },
-}
-
-function makeBubbleHtml(initialStyle, initialCount) {
+// ── 말풍선창 — 흰 원 + Sea Blue 배지 단일 스타일 ──
+function makeBubbleHtml(initialCount) {
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title></title>
 <style>
-  *,*::before,*::after{box-sizing:border-box;}
-  html,body{margin:0;padding:0;background:transparent;width:100vw;height:100vh;
-    overflow:hidden;-webkit-user-select:none;user-select:none;
-    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}
-  #root{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
-    cursor:pointer;}
-
-  /* A. classic-balloon */
-  .balloon{position:relative;background:#fff;color:#171717;border-radius:14px;
-    padding:7px 11px;
-    box-shadow:0 5px 14px rgba(0,0,0,0.22),0 1px 3px rgba(0,0,0,0.10);
-    display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600;
-    animation:cb-balloon-in 0.45s cubic-bezier(0.34,1.56,0.64,1) both;}
-  .balloon::after{content:'';position:absolute;right:-7px;top:50%;
-    transform:translateY(-50%);width:0;height:0;border-style:solid;
-    border-width:7px 0 7px 8px;border-color:transparent transparent transparent #fff;}
-  .balloon .ic{font-size:15px;line-height:1;}
-  .balloon .cnt{background:#ef4444;color:#fff;border-radius:8px;padding:1px 6px;
-    font-size:10.5px;font-weight:700;font-variant-numeric:tabular-nums;}
-  .balloon .lbl{color:rgba(0,0,0,0.5);font-size:12px;}
-  @keyframes cb-balloon-in{
-    0%{opacity:0;transform:translateX(10px) scale(0.7);}
-    60%{opacity:1;transform:translateX(-2px) scale(1.06);}
-    100%{opacity:1;transform:translateX(0) scale(1);}
-  }
-
-  /* B. attention-pill */
-  .pill{background:rgba(10,10,10,0.85);backdrop-filter:blur(20px);
-    -webkit-backdrop-filter:blur(20px);
-    border:1px solid rgba(255,255,255,0.08);color:#fff;border-radius:18px;
-    padding:7px 12px;display:flex;align-items:center;gap:8px;
-    font-size:12px;font-weight:600;
-    box-shadow:0 4px 12px rgba(0,0,0,0.32);
-    animation:cb-pill-in 0.42s cubic-bezier(0.2,0.9,0.3,1) both,
-              cb-pill-glow 2.2s ease-in-out infinite;}
-  .pill .ic{font-size:13px;line-height:1;}
-  .pill .lbl{letter-spacing:0.01em;}
-  .pill .cnt{background:#ef4444;color:#fff;min-width:18px;height:18px;border-radius:9px;
-    display:flex;align-items:center;justify-content:center;font-size:10.5px;
-    font-weight:700;padding:0 5px;font-variant-numeric:tabular-nums;}
-  @keyframes cb-pill-in{
-    from{opacity:0;transform:translateX(24px);}
-    to{opacity:1;transform:translateX(0);}
-  }
-  @keyframes cb-pill-glow{
-    0%,100%{box-shadow:0 4px 12px rgba(0,0,0,0.32),0 0 0 0 rgba(239,68,68,0);}
-    50%{box-shadow:0 4px 12px rgba(0,0,0,0.32),0 0 0 4px rgba(239,68,68,0.18);}
-  }
-
-  /* C. bouncing-bell — 새 질문 도착할 때마다 한 번만 흔들림 */
-  .bell-wrap{position:relative;width:36px;height:36px;display:flex;
-    align-items:center;justify-content:center;background:rgba(10,10,10,0.92);
-    border-radius:50%;box-shadow:0 3px 10px rgba(0,0,0,0.28);
-    animation:cb-bell-in 0.32s ease-out both;}
-  .bell-wrap svg{width:20px;height:20px;color:#fbbf24;transform-origin:top center;}
-  .bell-wrap.swing svg{animation:cb-bell-swing 0.85s ease-in-out;}
-  .bell-wrap .cnt{position:absolute;top:-4px;right:-4px;background:#ef4444;color:#fff;
-    min-width:18px;height:18px;border-radius:9px;display:flex;align-items:center;
-    justify-content:center;font-size:10.5px;font-weight:700;padding:0 4px;
-    border:2px solid rgba(10,10,10,0.92);font-variant-numeric:tabular-nums;}
-  @keyframes cb-bell-swing{
-    0%,100%{transform:rotate(0);}
-    20%{transform:rotate(14deg);}
-    40%{transform:rotate(-14deg);}
-    60%{transform:rotate(9deg);}
-    80%{transform:rotate(-5deg);}
-  }
-  @keyframes cb-bell-in{from{opacity:0;transform:scale(0.55);}to{opacity:1;transform:scale(1);}}
+*,*::before,*::after{box-sizing:border-box;}
+html,body{margin:0;padding:0;background:transparent;width:100vw;height:100vh;
+  overflow:hidden;-webkit-user-select:none;user-select:none;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}
+#root{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+  cursor:pointer;}
+.circle{position:relative;width:36px;height:36px;
+  background:#fff;border-radius:50%;
+  box-shadow:0 4px 12px rgba(0,0,0,0.22),0 1px 3px rgba(0,0,0,0.12);
+  animation:cb-circle-in 0.32s cubic-bezier(0.34,1.56,0.64,1) both;
+  transition:transform 0.15s ease;}
+#root:hover .circle{transform:scale(1.06);}
+.cnt{position:absolute;top:-4px;right:-4px;
+  min-width:18px;height:18px;padding:0 5px;
+  background:#28AAE1;color:#fff;border-radius:9px;
+  font-size:10.5px;font-weight:700;font-variant-numeric:tabular-nums;
+  display:flex;align-items:center;justify-content:center;
+  border:1.5px solid #fff;
+  box-shadow:0 2px 4px rgba(0,0,0,0.2);}
+@keyframes cb-circle-in{
+  from{opacity:0;transform:scale(0.5);}
+  to{opacity:1;transform:scale(1);}
+}
 </style></head>
 <body>
 <div id="root"></div>
 <script>
-  var style = ${JSON.stringify(initialStyle)};
-  var count = ${Number(initialCount) || 1};
-  var root = document.getElementById('root');
-
-  function render(){
-    var n = count > 99 ? '99+' : count;
-    var html = '';
-    if(style === 'balloon'){
-      html = '<div class="balloon"><span class="ic">💬</span>' +
-        (count > 1 ? '<span class="cnt">' + n + '</span>' : '<span class="lbl">새 질문</span>') +
-        '</div>';
-    } else if(style === 'pill'){
-      html = '<div class="pill"><span class="ic">💬</span>' +
-        '<span class="lbl">새 질문</span>' +
-        '<span class="cnt">' + n + '</span></div>';
-    } else if(style === 'bell'){
-      html = '<div class="bell-wrap" id="bw">' +
-        '<svg fill="currentColor" viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>' +
-        '<span class="cnt">' + n + '</span></div>';
-    }
-    root.innerHTML = html;
-  }
-  // 종 흔들림 1회 트리거 — class swing 을 잠깐 추가했다가 제거.
-  // CSS animation 은 class 가 적용된 동안만 작동, 끝나면 멈춤.
-  function triggerBellSwing(){
-    if(style !== 'bell') return;
-    var bw = document.getElementById('bw');
-    if(!bw) return;
-    bw.classList.remove('swing');
-    // reflow 강제 — class 재추가 시 애니메이션 다시 시작
-    void bw.offsetWidth;
-    bw.classList.add('swing');
-  }
-  root.addEventListener('click', function(){
-    if(window.popupAPI && window.popupAPI.bubbleClicked) window.popupAPI.bubbleClicked();
+var count = ${Number(initialCount) || 1};
+var root = document.getElementById('root');
+function render(){
+  var n = count > 99 ? '99+' : count;
+  root.innerHTML = '<div class="circle"><span class="cnt">' + n + '</span></div>';
+}
+root.addEventListener('click', function(){
+  if(window.popupAPI && window.popupAPI.bubbleClicked) window.popupAPI.bubbleClicked();
+});
+if(window.popupAPI && window.popupAPI.onBubbleUpdate){
+  window.popupAPI.onBubbleUpdate(function(d){
+    if(d && typeof d.count === 'number') count = d.count;
+    render();
   });
-  if(window.popupAPI && window.popupAPI.onBubbleUpdate){
-    window.popupAPI.onBubbleUpdate(function(d){
-      var newCount = (d && typeof d.count === 'number') ? d.count : count;
-      var styleChanged = (d && typeof d.style === 'string' && d.style !== style);
-      var countIncreased = newCount > count;
-      if(d && typeof d.style === 'string') style = d.style;
-      if(d && typeof d.count === 'number') count = newCount;
-      render();
-      // 새 질문 도착 (count 증가) 또는 스타일 변경 시 종 한 번 흔들림
-      if(countIncreased || styleChanged) {
-        requestAnimationFrame(triggerBellSwing);
-      }
-    });
-  }
-  render();
-  // 최초 등장 시에도 종 한 번 흔들림
-  requestAnimationFrame(triggerBellSwing);
+}
+render();
 </script>
 </body></html>`
 }
@@ -634,6 +547,10 @@ function makeCardHtml(initialText, initialIdx, initialTotal) {
     font-size:12.5px;font-weight:600;cursor:pointer;transition:background 0.15s ease;
     letter-spacing:0.01em;}
   .btn:hover{background:#262626;}
+  /* V 체크 — 마지막 질문 확인 시 원형 아이콘 버튼 */
+  .btn.check{width:36px;height:36px;padding:0;border-radius:50%;
+    display:inline-flex;align-items:center;justify-content:center;}
+  .btn.check svg{width:16px;height:16px;}
 </style></head>
 <body>
 <div id="card">
@@ -649,12 +566,21 @@ function makeCardHtml(initialText, initialIdx, initialTotal) {
   var elText = document.getElementById('text');
   var elCnt = document.getElementById('cnt');
   var elBtn = document.getElementById('btn');
+  var CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"/></svg>';
 
   function render(){
     var isLast = currentIdx >= total - 1;
     elText.textContent = text;
     elCnt.textContent = total > 1 ? ((currentIdx + 1) + ' / ' + total) : '질문';
-    elBtn.textContent = isLast ? '확인' : '다음';
+    if(isLast){
+      elBtn.className = 'btn check';
+      elBtn.innerHTML = CHECK_SVG;
+      elBtn.setAttribute('aria-label','확인');
+    } else {
+      elBtn.className = 'btn';
+      elBtn.textContent = '다음';
+      elBtn.removeAttribute('aria-label');
+    }
     // resize 알림 — 다음 frame 에 (텍스트 layout 완료 후)
     requestAnimationFrame(notifyResize);
   }
@@ -699,20 +625,15 @@ function createTransparentPopupWindow(w, h, x, y) {
   return win
 }
 
-function ensurePopupBubbleWindow(style, count) {
+function ensurePopupBubbleWindow(count) {
   if (popupBubbleWindow && !popupBubbleWindow.isDestroyed()) {
-    // 사이즈만 갱신 (스타일 변경 시 사이즈도 달라짐)
-    const dim = BUBBLE_DIMENSIONS[style] || BUBBLE_DIMENSIONS.balloon
-    const bounds = popupPositionLeftOfWidget(dim.w, dim.h, 'center')
-    try { popupBubbleWindow.setBounds(bounds) } catch {}
-    popupBubbleWindow.webContents.send('popup-bubble-update', { style, count })
+    popupBubbleWindow.webContents.send('popup-bubble-update', { count })
     return popupBubbleWindow
   }
-  const dim = BUBBLE_DIMENSIONS[style] || BUBBLE_DIMENSIONS.balloon
-  const bounds = popupPositionLeftOfWidget(dim.w, dim.h)
+  const bounds = popupPositionLeftOfWidget(BUBBLE_W, BUBBLE_H, 'center')
   const win = createTransparentPopupWindow(bounds.width, bounds.height, bounds.x, bounds.y)
   popupBubbleWindow = win
-  win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(makeBubbleHtml(style, count)))
+  win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(makeBubbleHtml(count)))
   win.once('ready-to-show', () => { if (!win.isDestroyed()) win.showInactive() })
   win.on('closed', () => { if (popupBubbleWindow === win) popupBubbleWindow = null })
   return win
@@ -733,12 +654,11 @@ function ensurePopupCardWindow(text, currentIdx, total) {
 }
 
 ipcMain.on('popup-show-bubble', (_, opts) => {
+  // 말풍선은 popup_only 모드 전용 (mini 모드는 위젯 자체에 카운트 표시)
   if (!popupModeActive) return
-  const style = (opts && typeof opts.style === 'string' && BUBBLE_DIMENSIONS[opts.style]) ? opts.style : 'balloon'
   const count = Math.max(1, Math.min(9999, Number(opts && opts.count) || 1))
-  // 카드창 떠 있으면 말풍선은 안 띄움 (사용자가 본문 보는 중)
   if (popupCardWindow && !popupCardWindow.isDestroyed()) return
-  ensurePopupBubbleWindow(style, count)
+  ensurePopupBubbleWindow(count)
 })
 
 ipcMain.on('popup-hide-bubble', () => {
@@ -747,11 +667,11 @@ ipcMain.on('popup-hide-bubble', () => {
 })
 
 ipcMain.on('popup-show-card', (_, opts) => {
-  if (!popupModeActive) return
+  // 카드는 popup_only 모드 + mini 모드 (질문 클릭) 모두에서 등장 가능 — popupModeActive 체크 X
   const text = (opts && typeof opts.text === 'string') ? opts.text.slice(0, 500) : ''
+  if (!text) return
   const currentIdx = Math.max(0, Math.round(Number(opts && opts.currentIdx) || 0))
   const total = Math.max(1, Math.round(Number(opts && opts.total) || 1))
-  // 말풍선 떠 있으면 닫음 (카드가 같은 자리에 등장)
   if (popupBubbleWindow && !popupBubbleWindow.isDestroyed()) popupBubbleWindow.close()
   popupBubbleWindow = null
   ensurePopupCardWindow(text, currentIdx, total)

@@ -27,7 +27,7 @@ declare global {
       // popup_only 모드 — 위젯창은 52×52 고정, 말풍선/본문 카드는 별도 BrowserWindow
       enterPopupMode?: () => void
       exitPopupMode?: () => void
-      showPopupBubble?: (opts: { style: string; count: number }) => void
+      showPopupBubble?: (opts: { count: number }) => void
       hidePopupBubble?: () => void
       showPopupCard?: (opts: { text: string; currentIdx: number; total: number }) => void
       hidePopupCard?: () => void
