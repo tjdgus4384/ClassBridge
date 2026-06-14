@@ -298,12 +298,12 @@ ipcMain.on('set-live-size', (_, payload) => {
 // ── popup_only 모드 ─────────────────────────────────────────────────────────
 // 위젯창은 popup 모드 동안 52×52 고정. 말풍선/본문 카드는 별도 BrowserWindow 로 관리.
 // 말풍선/카드 위치: 위젯창 왼쪽 옆에 anchor.
-const POPUP_TINY_W = 52
-const POPUP_TINY_H = 52
+const POPUP_TINY_W = 44
+const POPUP_TINY_H = 44
 const POPUP_GAP = 8                 // 위젯 ↔ 말풍선/카드 간 간격
-const CARD_W = 280
-const CARD_DEFAULT_H = 110          // 카드 처음 등장 시 임시 높이 — ResizeObserver 가 조정
-const CARD_MAX_H = 260
+const CARD_W = 312                  // 본문 280 + 양옆 16px 그림자 buffer
+const CARD_DEFAULT_H = 140          // 카드 처음 등장 시 임시 높이 — ResizeObserver 가 조정
+const CARD_MAX_H = 320
 let popupModeActive = false
 let savedWidgetBounds = null
 let popupBubbleWindow = null
@@ -391,10 +391,12 @@ function escHtmlPopup(s) {
 }
 
 // ── 말풍선창 — 3가지 스타일 (balloon / pill / bell) inline JS 분기 ──
+// 윈도우 사이즈 = 콘텐츠 + 그림자 buffer (각 변 ~14-16px). 그림자가 잘리지 않게.
+// 콘텐츠는 flex 로 중앙 정렬되며 buffer 영역은 transparent (사용자 입장에선 안 보임).
 const BUBBLE_DIMENSIONS = {
-  balloon: { w: 88, h: 44 },
-  pill:    { w: 130, h: 36 },
-  bell:    { w: 44, h: 44 },
+  balloon: { w: 124, h: 70 },
+  pill:    { w: 168, h: 64 },
+  bell:    { w: 68, h: 68 },
 }
 
 function makeBubbleHtml(initialStyle, initialCount) {
@@ -409,13 +411,13 @@ function makeBubbleHtml(initialStyle, initialCount) {
 
   /* A. classic-balloon */
   .balloon{position:relative;background:#fff;color:#171717;border-radius:14px;
-    padding:7px 11px;box-shadow:0 8px 24px rgba(0,0,0,0.28),0 2px 6px rgba(0,0,0,0.15);
+    padding:7px 11px;
+    box-shadow:0 5px 14px rgba(0,0,0,0.22),0 1px 3px rgba(0,0,0,0.10);
     display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600;
     animation:cb-balloon-in 0.45s cubic-bezier(0.34,1.56,0.64,1) both;}
   .balloon::after{content:'';position:absolute;right:-7px;top:50%;
     transform:translateY(-50%);width:0;height:0;border-style:solid;
-    border-width:7px 0 7px 8px;border-color:transparent transparent transparent #fff;
-    filter:drop-shadow(2px 0 2px rgba(0,0,0,0.08));}
+    border-width:7px 0 7px 8px;border-color:transparent transparent transparent #fff;}
   .balloon .ic{font-size:15px;line-height:1;}
   .balloon .cnt{background:#ef4444;color:#fff;border-radius:8px;padding:1px 6px;
     font-size:10.5px;font-weight:700;font-variant-numeric:tabular-nums;}
@@ -432,7 +434,7 @@ function makeBubbleHtml(initialStyle, initialCount) {
     border:1px solid rgba(255,255,255,0.08);color:#fff;border-radius:18px;
     padding:7px 12px;display:flex;align-items:center;gap:8px;
     font-size:12px;font-weight:600;
-    box-shadow:0 6px 18px rgba(0,0,0,0.35);
+    box-shadow:0 4px 12px rgba(0,0,0,0.32);
     animation:cb-pill-in 0.42s cubic-bezier(0.2,0.9,0.3,1) both,
               cb-pill-glow 2.2s ease-in-out infinite;}
   .pill .ic{font-size:13px;line-height:1;}
@@ -445,14 +447,14 @@ function makeBubbleHtml(initialStyle, initialCount) {
     to{opacity:1;transform:translateX(0);}
   }
   @keyframes cb-pill-glow{
-    0%,100%{box-shadow:0 6px 18px rgba(0,0,0,0.35),0 0 0 0 rgba(239,68,68,0);}
-    50%{box-shadow:0 6px 18px rgba(0,0,0,0.35),0 0 0 5px rgba(239,68,68,0.18);}
+    0%,100%{box-shadow:0 4px 12px rgba(0,0,0,0.32),0 0 0 0 rgba(239,68,68,0);}
+    50%{box-shadow:0 4px 12px rgba(0,0,0,0.32),0 0 0 4px rgba(239,68,68,0.18);}
   }
 
   /* C. bouncing-bell — 새 질문 도착할 때마다 한 번만 흔들림 */
   .bell-wrap{position:relative;width:36px;height:36px;display:flex;
     align-items:center;justify-content:center;background:rgba(10,10,10,0.92);
-    border-radius:50%;box-shadow:0 4px 14px rgba(0,0,0,0.32);
+    border-radius:50%;box-shadow:0 3px 10px rgba(0,0,0,0.28);
     animation:cb-bell-in 0.32s ease-out both;}
   .bell-wrap svg{width:20px;height:20px;color:#fbbf24;transform-origin:top center;}
   .bell-wrap.swing svg{animation:cb-bell-swing 0.85s ease-in-out;}
@@ -537,9 +539,9 @@ function makeCardHtml(initialText, initialIdx, initialTotal) {
   html,body{margin:0;padding:0;background:transparent;width:100vw;height:100vh;
     overflow:hidden;-webkit-user-select:none;user-select:none;
     font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}
-  #card{position:fixed;left:6px;right:6px;top:6px;
+  #card{position:fixed;left:16px;right:16px;top:16px;
     background:#fff;border-radius:14px;
-    box-shadow:0 12px 32px rgba(0,0,0,0.28),0 2px 6px rgba(0,0,0,0.14);
+    box-shadow:0 6px 16px rgba(0,0,0,0.20),0 1px 3px rgba(0,0,0,0.10);
     padding:13px 15px 12px;display:flex;flex-direction:column;gap:10px;
     animation:cb-card-in 0.3s cubic-bezier(0.2,0.9,0.3,1) both;}
   @keyframes cb-card-in{
@@ -582,7 +584,7 @@ function makeCardHtml(initialText, initialIdx, initialTotal) {
   }
   function notifyResize(){
     var rect = card.getBoundingClientRect();
-    var h = Math.ceil(rect.height) + 12; // top:6 + bottom:6 inset
+    var h = Math.ceil(rect.height) + 32; // top:16 + bottom:16 buffer (그림자 fit)
     if(window.popupAPI && window.popupAPI.requestCardResize) window.popupAPI.requestCardResize(h);
   }
   elBtn.addEventListener('click', function(){

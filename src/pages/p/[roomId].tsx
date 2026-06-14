@@ -599,7 +599,8 @@ export default function ProfessorDashboard() {
     if (studentUrl) navigator.clipboard.writeText(studentUrl)
   }
 
-  // ── popup_only + 라이브: 위젯창은 52×52 정사각형 (복귀 버튼만) ──
+  // ── popup_only + 라이브: 위젯창은 44×44 정사각형 (복귀 버튼만) ──
+  // 미니 모드처럼 반투명 + backdrop-blur — 둥근 모서리 부분도 자연스럽게 비침, 이중 박스 X.
   // 말풍선/본문 카드는 별도 BrowserWindow 로 위젯 옆에 나타남 (main.js 가 관리).
   // 전체 컨테이너 WebkitAppRegion: drag, 버튼만 no-drag — 빈 공간 잡아 드래그.
   if (isLive && widgetMode === 'popup_only' && isElectron) {
@@ -607,7 +608,7 @@ export default function ProfessorDashboard() {
       <>
         <Head><title>ClassBridge</title></Head>
         <div
-          className="w-screen h-screen bg-[#0a0a0a] text-white select-none flex items-center justify-center"
+          className="w-screen h-screen bg-black/65 backdrop-blur-2xl text-white select-none flex items-center justify-center"
           style={{
             WebkitAppRegion: 'drag',
             borderRadius: 12,
@@ -616,7 +617,7 @@ export default function ProfessorDashboard() {
         >
           <button
             onClick={() => changeWidgetMode('full')}
-            className="flex items-center justify-center w-7 h-7 rounded-md text-white/55 hover:text-white hover:bg-white/8 transition-colors"
+            className="flex items-center justify-center w-6 h-6 rounded-md text-white/65 hover:text-white hover:bg-white/8 transition-colors"
             style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
             title="전체 보기로 복귀"
           >
