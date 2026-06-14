@@ -62,7 +62,7 @@ const SPLASH_HTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Cla
 <style>
   html,body{margin:0;padding:0;background:#0a0a0a;color:#fff;height:100vh;overflow:hidden;
     font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-    -webkit-app-region:drag;-webkit-user-select:none;}
+    -webkit-user-select:none;}
   body{display:flex;align-items:center;justify-content:center;}
   .c{text-align:center;}
   .name{font-size:30px;font-weight:700;letter-spacing:-0.02em;}

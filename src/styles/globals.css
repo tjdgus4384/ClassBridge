@@ -14,6 +14,13 @@ html, body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Electron 명시적 no-drag — splash 의 -webkit-app-region: drag 가 real page 로 전환된
+   뒤에도 drag mask 가 남는 quirk 회피. 위젯/메인창의 클릭 가능 영역은 이 default 위에
+   인라인 style { WebkitAppRegion: 'drag' } 로 명시한 곳만 드래그. */
+html, body {
+  -webkit-app-region: no-drag;
+}
+
 * {
   box-sizing: border-box;
 }
