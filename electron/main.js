@@ -163,12 +163,22 @@ function createWidgetWindow(roomId, ownerToken) {
     })
   })
 
+  // 위젯 이동 시 말풍선/카드 따라가게
+  widgetWindow.on('move', () => {
+    if (popupModeActive) reattachPopupWindowsToWidget()
+  })
+
   widgetWindow.on('closed', () => {
     widgetWindow = null
     widgetClosing = false
     isLiveSession = false  // 다음 위젯 진입 시 stale 상태로 confirm 뜨지 않도록
     popupModeActive = false
     savedWidgetBounds = null
+    // 말풍선/카드 정리
+    if (popupBubbleWindow && !popupBubbleWindow.isDestroyed()) popupBubbleWindow.close()
+    if (popupCardWindow && !popupCardWindow.isDestroyed()) popupCardWindow.close()
+    popupBubbleWindow = null
+    popupCardWindow = null
     // 위젯 닫혔으면 랜딩으로 복귀 (앱 종료 중이면 skip)
     if (isAppQuitting) return
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show()
@@ -286,14 +296,18 @@ ipcMain.on('set-live-size', (_, payload) => {
 })
 
 // ── popup_only 모드 ─────────────────────────────────────────────────────────
-// 미니 모드와 같은 패턴 — 별도 BrowserWindow 안 만들고 같은 위젯창의 콘텐츠/사이즈만 바꿈.
-// 사이즈는 렌더러가 setPopupSize(w,h) IPC 로 명시. 우측 끝 anchor 유지.
-// 세로 폭은 항상 MINI_H (52). 가로만 변동.
+// 위젯창은 popup 모드 동안 52×52 고정. 말풍선/본문 카드는 별도 BrowserWindow 로 관리.
+// 말풍선/카드 위치: 위젯창 왼쪽 옆에 anchor.
 const POPUP_TINY_W = 52
 const POPUP_TINY_H = 52
+const POPUP_GAP = 8                 // 위젯 ↔ 말풍선/카드 간 간격
+const CARD_W = 280
+const CARD_DEFAULT_H = 110          // 카드 처음 등장 시 임시 높이 — ResizeObserver 가 조정
+const CARD_MAX_H = 260
 let popupModeActive = false
 let savedWidgetBounds = null
-let pendingResizeAnim = null
+let popupBubbleWindow = null
+let popupCardWindow = null
 
 function clampToDisplay(x, y, w, h, refBounds) {
   const display = screen.getDisplayMatching(refBounds || { x, y, width: w, height: h }).workArea
@@ -302,36 +316,7 @@ function clampToDisplay(x, y, w, h, refBounds) {
   return { x: nx, y: ny, width: w, height: h }
 }
 
-// 윈도우 bounds 를 target 으로 부드럽게 보간 — popup 모드 내 상태 전환용.
-// 매 frame setBounds 호출. ease-out cubic. 180ms 정도가 자연스러움.
-function animateWidgetBoundsTo(target, durationMs = 180) {
-  if (!widgetWindow || widgetWindow.isDestroyed()) return
-  if (pendingResizeAnim) { clearTimeout(pendingResizeAnim); pendingResizeAnim = null }
-  const start = widgetWindow.getBounds()
-  // 시작 = target 이면 패스
-  if (start.x === target.x && start.y === target.y &&
-      start.width === target.width && start.height === target.height) return
-  const startTime = Date.now()
-  const step = () => {
-    pendingResizeAnim = null
-    if (!widgetWindow || widgetWindow.isDestroyed()) return
-    if (widgetClosing) return
-    const elapsed = Date.now() - startTime
-    const t = Math.min(1, elapsed / durationMs)
-    const eased = 1 - Math.pow(1 - t, 3)
-    const cur = {
-      x: Math.round(start.x + (target.x - start.x) * eased),
-      y: Math.round(start.y + (target.y - start.y) * eased),
-      width: Math.round(start.width + (target.width - start.width) * eased),
-      height: Math.round(start.height + (target.height - start.height) * eased),
-    }
-    try { widgetWindow.setBounds(cur) } catch {}
-    if (t < 1) pendingResizeAnim = setTimeout(step, 16)
-  }
-  step()
-}
-
-function setWidgetSizeAnchorRight(w, h, animate = false) {
+function setWidgetSizeAnchorRight(w, h) {
   if (!widgetWindow || widgetWindow.isDestroyed()) return
   if (widgetClosing) return
   const cur = widgetWindow.getBounds()
@@ -340,11 +325,37 @@ function setWidgetSizeAnchorRight(w, h, animate = false) {
   widgetWindow.setResizable(true)
   widgetWindow.setMinimumSize(0, 0)
   widgetWindow.setMaximumSize(0, 0)
-  if (animate) {
-    animateWidgetBoundsTo(target, 180)
+  widgetWindow.setBounds(target)
+}
+
+// 말풍선/카드 위치 — 위젯 왼쪽 옆 (우측 끝 = 위젯.x - GAP), 상단 정렬.
+function popupPositionLeftOfWidget(w, h) {
+  const widgetBounds = (widgetWindow && !widgetWindow.isDestroyed())
+    ? widgetWindow.getBounds()
+    : null
+  let x, y
+  if (widgetBounds) {
+    x = widgetBounds.x - w - POPUP_GAP
+    y = widgetBounds.y
   } else {
-    if (pendingResizeAnim) { clearTimeout(pendingResizeAnim); pendingResizeAnim = null }
-    widgetWindow.setBounds(target)
+    const d = screen.getPrimaryDisplay().workArea
+    x = d.x + d.width - w - 60
+    y = d.y + 30
+  }
+  return clampToDisplay(x, y, w, h, widgetBounds || { x, y, width: w, height: h })
+}
+
+// 위젯 이동 시 말풍선/카드 따라가게
+function reattachPopupWindowsToWidget() {
+  if (popupBubbleWindow && !popupBubbleWindow.isDestroyed()) {
+    const b = popupBubbleWindow.getBounds()
+    const bounds = popupPositionLeftOfWidget(b.width, b.height)
+    try { popupBubbleWindow.setBounds(bounds) } catch {}
+  }
+  if (popupCardWindow && !popupCardWindow.isDestroyed()) {
+    const b = popupCardWindow.getBounds()
+    const bounds = popupPositionLeftOfWidget(b.width, b.height)
+    try { popupCardWindow.setBounds(bounds) } catch {}
   }
 }
 
@@ -354,26 +365,344 @@ ipcMain.on('enter-popup-mode', () => {
   if (popupModeActive) return
   popupModeActive = true
   savedWidgetBounds = widgetWindow.getBounds()
-  setWidgetSizeAnchorRight(POPUP_TINY_W, POPUP_TINY_H, false)   // 큰 점프 — 즉시
+  setWidgetSizeAnchorRight(POPUP_TINY_W, POPUP_TINY_H)
 })
 
 ipcMain.on('exit-popup-mode', () => {
   if (!widgetWindow || widgetWindow.isDestroyed()) return
   if (!popupModeActive) return
   popupModeActive = false
+  // 말풍선/카드 정리
+  if (popupBubbleWindow && !popupBubbleWindow.isDestroyed()) popupBubbleWindow.close()
+  if (popupCardWindow && !popupCardWindow.isDestroyed()) popupCardWindow.close()
+  popupBubbleWindow = null
+  popupCardWindow = null
   const targetW = savedWidgetBounds?.width || MINI_W
   const targetH = savedWidgetBounds?.height || LIVE_TEMP_HEIGHT
-  setWidgetSizeAnchorRight(targetW, targetH, false)             // 큰 점프 — 즉시
+  setWidgetSizeAnchorRight(targetW, targetH)
   savedWidgetBounds = null
 })
 
-// 렌더러가 콘텐츠 상태 (tiny / bubble / expanded) 변경 시 호출 — 부드럽게 보간
-ipcMain.on('set-popup-size', (_, payload) => {
+// ── HTML escape (공용) ──
+function escHtmlPopup(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])
+  )
+}
+
+// ── 말풍선창 — 4가지 스타일 (balloon / dot / pill / bell) inline JS 분기 ──
+const BUBBLE_DIMENSIONS = {
+  balloon: { w: 88, h: 44 },
+  dot:     { w: 44, h: 24 },
+  pill:    { w: 130, h: 36 },
+  bell:    { w: 44, h: 44 },
+}
+
+function makeBubbleHtml(initialStyle, initialCount) {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title></title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:transparent;width:100vw;height:100vh;
+    overflow:hidden;-webkit-user-select:none;user-select:none;
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}
+  #root{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    cursor:pointer;}
+
+  /* A. classic-balloon */
+  .balloon{position:relative;background:#fff;color:#171717;border-radius:14px;
+    padding:7px 11px;box-shadow:0 8px 24px rgba(0,0,0,0.28),0 2px 6px rgba(0,0,0,0.15);
+    display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600;
+    animation:cb-balloon-in 0.45s cubic-bezier(0.34,1.56,0.64,1) both;}
+  .balloon::after{content:'';position:absolute;right:-7px;top:50%;
+    transform:translateY(-50%);width:0;height:0;border-style:solid;
+    border-width:7px 0 7px 8px;border-color:transparent transparent transparent #fff;
+    filter:drop-shadow(2px 0 2px rgba(0,0,0,0.08));}
+  .balloon .ic{font-size:15px;line-height:1;}
+  .balloon .cnt{background:#ef4444;color:#fff;border-radius:8px;padding:1px 6px;
+    font-size:10.5px;font-weight:700;font-variant-numeric:tabular-nums;}
+  .balloon .lbl{color:rgba(0,0,0,0.5);font-size:12px;}
+  @keyframes cb-balloon-in{
+    0%{opacity:0;transform:translateX(10px) scale(0.7);}
+    60%{opacity:1;transform:translateX(-2px) scale(1.06);}
+    100%{opacity:1;transform:translateX(0) scale(1);}
+  }
+
+  /* B. floating-dot */
+  .dot-wrap{display:flex;align-items:center;gap:6px;
+    animation:cb-dot-in 0.32s ease-out both;}
+  .dot{position:relative;width:12px;height:12px;border-radius:50%;background:#ef4444;
+    box-shadow:0 0 0 0 rgba(239,68,68,0.6);}
+  .dot::before{content:'';position:absolute;inset:-2px;border-radius:50%;
+    background:rgba(239,68,68,0.55);animation:cb-dot-pulse 1.6s ease-out infinite;z-index:-1;}
+  .dot-wrap .cnt{background:rgba(10,10,10,0.92);color:#fff;border-radius:8px;
+    padding:2px 7px;font-size:10.5px;font-weight:700;
+    box-shadow:0 2px 8px rgba(0,0,0,0.35);font-variant-numeric:tabular-nums;}
+  @keyframes cb-dot-pulse{
+    0%{transform:scale(1);opacity:0.9;}
+    100%{transform:scale(2.6);opacity:0;}
+  }
+  @keyframes cb-dot-in{from{opacity:0;transform:scale(0);}to{opacity:1;transform:scale(1);}}
+
+  /* C. attention-pill */
+  .pill{background:rgba(10,10,10,0.85);backdrop-filter:blur(20px);
+    -webkit-backdrop-filter:blur(20px);
+    border:1px solid rgba(255,255,255,0.08);color:#fff;border-radius:18px;
+    padding:7px 12px;display:flex;align-items:center;gap:8px;
+    font-size:12px;font-weight:600;
+    box-shadow:0 6px 18px rgba(0,0,0,0.35);
+    animation:cb-pill-in 0.42s cubic-bezier(0.2,0.9,0.3,1) both,
+              cb-pill-glow 2.2s ease-in-out infinite;}
+  .pill .ic{font-size:13px;line-height:1;}
+  .pill .lbl{letter-spacing:0.01em;}
+  .pill .cnt{background:#ef4444;color:#fff;min-width:18px;height:18px;border-radius:9px;
+    display:flex;align-items:center;justify-content:center;font-size:10.5px;
+    font-weight:700;padding:0 5px;font-variant-numeric:tabular-nums;}
+  @keyframes cb-pill-in{
+    from{opacity:0;transform:translateX(24px);}
+    to{opacity:1;transform:translateX(0);}
+  }
+  @keyframes cb-pill-glow{
+    0%,100%{box-shadow:0 6px 18px rgba(0,0,0,0.35),0 0 0 0 rgba(239,68,68,0);}
+    50%{box-shadow:0 6px 18px rgba(0,0,0,0.35),0 0 0 5px rgba(239,68,68,0.18);}
+  }
+
+  /* D. bouncing-bell */
+  .bell-wrap{position:relative;width:36px;height:36px;display:flex;
+    align-items:center;justify-content:center;background:rgba(10,10,10,0.92);
+    border-radius:50%;box-shadow:0 4px 14px rgba(0,0,0,0.32);
+    animation:cb-bell-in 0.32s ease-out both;}
+  .bell-wrap svg{width:20px;height:20px;color:#fbbf24;
+    animation:cb-bell-swing 2.2s ease-in-out infinite;transform-origin:top center;}
+  .bell-wrap .cnt{position:absolute;top:-4px;right:-4px;background:#ef4444;color:#fff;
+    min-width:18px;height:18px;border-radius:9px;display:flex;align-items:center;
+    justify-content:center;font-size:10.5px;font-weight:700;padding:0 4px;
+    border:2px solid rgba(10,10,10,0.92);font-variant-numeric:tabular-nums;}
+  @keyframes cb-bell-swing{
+    0%,100%{transform:rotate(0);}
+    20%{transform:rotate(14deg);}
+    40%{transform:rotate(-14deg);}
+    60%{transform:rotate(9deg);}
+    80%{transform:rotate(-5deg);}
+  }
+  @keyframes cb-bell-in{from{opacity:0;transform:scale(0.55);}to{opacity:1;transform:scale(1);}}
+</style></head>
+<body>
+<div id="root"></div>
+<script>
+  var style = ${JSON.stringify(initialStyle)};
+  var count = ${Number(initialCount) || 1};
+  var root = document.getElementById('root');
+
+  function render(){
+    var n = count > 99 ? '99+' : count;
+    var html = '';
+    if(style === 'balloon'){
+      html = '<div class="balloon"><span class="ic">💬</span>' +
+        (count > 1 ? '<span class="cnt">' + n + '</span>' : '<span class="lbl">새 질문</span>') +
+        '</div>';
+    } else if(style === 'dot'){
+      html = '<div class="dot-wrap"><span class="dot"></span>' +
+        (count > 1 ? '<span class="cnt">' + n + '</span>' : '') +
+        '</div>';
+    } else if(style === 'pill'){
+      html = '<div class="pill"><span class="ic">💬</span>' +
+        '<span class="lbl">새 질문</span>' +
+        '<span class="cnt">' + n + '</span></div>';
+    } else if(style === 'bell'){
+      html = '<div class="bell-wrap">' +
+        '<svg fill="currentColor" viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>' +
+        '<span class="cnt">' + n + '</span></div>';
+    }
+    root.innerHTML = html;
+  }
+  root.addEventListener('click', function(){
+    if(window.popupAPI && window.popupAPI.bubbleClicked) window.popupAPI.bubbleClicked();
+  });
+  if(window.popupAPI && window.popupAPI.onBubbleUpdate){
+    window.popupAPI.onBubbleUpdate(function(d){
+      if(d && typeof d.style === 'string') style = d.style;
+      if(d && typeof d.count === 'number') count = d.count;
+      render();
+    });
+  }
+  render();
+</script>
+</body></html>`
+}
+
+// ── 본문 카드창 — 폭 280 고정, 높이 가변 (ResizeObserver 가 main 에 요청) ──
+function makeCardHtml(initialText, initialIdx, initialTotal) {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title></title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:transparent;width:100vw;height:100vh;
+    overflow:hidden;-webkit-user-select:none;user-select:none;
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}
+  #card{position:fixed;left:6px;right:6px;top:6px;
+    background:#fff;border-radius:14px;
+    box-shadow:0 12px 32px rgba(0,0,0,0.28),0 2px 6px rgba(0,0,0,0.14);
+    padding:13px 15px 12px;display:flex;flex-direction:column;gap:10px;
+    animation:cb-card-in 0.3s cubic-bezier(0.2,0.9,0.3,1) both;}
+  @keyframes cb-card-in{
+    from{opacity:0;transform:translateX(18px) scale(0.96);}
+    to{opacity:1;transform:translateX(0) scale(1);}
+  }
+  .head{display:flex;align-items:center;gap:6px;
+    color:rgba(0,0,0,0.45);font-size:11px;font-weight:600;letter-spacing:0.02em;}
+  .head .dot{width:6px;height:6px;border-radius:50%;background:#10b981;}
+  .text{color:#171717;font-size:14px;font-weight:500;line-height:1.5;
+    word-break:break-word;}
+  .act{display:flex;justify-content:flex-end;margin-top:2px;}
+  .btn{background:#0a0a0a;color:#fff;border:0;padding:7px 16px;border-radius:8px;
+    font-size:12.5px;font-weight:600;cursor:pointer;transition:background 0.15s ease;
+    letter-spacing:0.01em;}
+  .btn:hover{background:#262626;}
+</style></head>
+<body>
+<div id="card">
+  <div class="head"><span class="dot"></span><span id="cnt"></span></div>
+  <div class="text" id="text"></div>
+  <div class="act"><button class="btn" id="btn"></button></div>
+</div>
+<script>
+  var text = ${JSON.stringify(initialText)};
+  var currentIdx = ${Number(initialIdx) || 0};
+  var total = ${Number(initialTotal) || 1};
+  var card = document.getElementById('card');
+  var elText = document.getElementById('text');
+  var elCnt = document.getElementById('cnt');
+  var elBtn = document.getElementById('btn');
+
+  function render(){
+    var isLast = currentIdx >= total - 1;
+    elText.textContent = text;
+    elCnt.textContent = total > 1 ? ((currentIdx + 1) + ' / ' + total) : '질문';
+    elBtn.textContent = isLast ? '확인' : '다음';
+    // resize 알림 — 다음 frame 에 (텍스트 layout 완료 후)
+    requestAnimationFrame(notifyResize);
+  }
+  function notifyResize(){
+    var rect = card.getBoundingClientRect();
+    var h = Math.ceil(rect.height) + 12; // top:6 + bottom:6 inset
+    if(window.popupAPI && window.popupAPI.requestCardResize) window.popupAPI.requestCardResize(h);
+  }
+  elBtn.addEventListener('click', function(){
+    if(window.popupAPI && window.popupAPI.cardAction) window.popupAPI.cardAction();
+  });
+  if(window.popupAPI && window.popupAPI.onCardUpdate){
+    window.popupAPI.onCardUpdate(function(d){
+      if(d && typeof d.text === 'string') text = d.text;
+      if(d && typeof d.currentIdx === 'number') currentIdx = d.currentIdx;
+      if(d && typeof d.total === 'number') total = d.total;
+      render();
+    });
+  }
+  // 본문 카드 어느 영역이든 클릭 시 close 는 아니고 — 명시적 버튼만.
+  render();
+</script>
+</body></html>`
+}
+
+function createTransparentPopupWindow(w, h, x, y) {
+  const win = new BrowserWindow({
+    width: w, height: h, x, y,
+    frame: false, transparent: true, backgroundColor: '#00000000',
+    alwaysOnTop: true, hasShadow: true,
+    resizable: true, minimizable: false, maximizable: false, skipTaskbar: true,
+    focusable: false, show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'popup-preload.js'),
+      nodeIntegration: false, contextIsolation: true, sandbox: true,
+      backgroundThrottling: false,
+    },
+  })
+  win.setAlwaysOnTop(true, 'screen-saver')
+  return win
+}
+
+function ensurePopupBubbleWindow(style, count) {
+  if (popupBubbleWindow && !popupBubbleWindow.isDestroyed()) {
+    // 사이즈만 갱신 (스타일 변경 시 사이즈도 달라짐)
+    const dim = BUBBLE_DIMENSIONS[style] || BUBBLE_DIMENSIONS.balloon
+    const bounds = popupPositionLeftOfWidget(dim.w, dim.h)
+    try { popupBubbleWindow.setBounds(bounds) } catch {}
+    popupBubbleWindow.webContents.send('popup-bubble-update', { style, count })
+    return popupBubbleWindow
+  }
+  const dim = BUBBLE_DIMENSIONS[style] || BUBBLE_DIMENSIONS.balloon
+  const bounds = popupPositionLeftOfWidget(dim.w, dim.h)
+  const win = createTransparentPopupWindow(bounds.width, bounds.height, bounds.x, bounds.y)
+  popupBubbleWindow = win
+  win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(makeBubbleHtml(style, count)))
+  win.once('ready-to-show', () => { if (!win.isDestroyed()) win.showInactive() })
+  win.on('closed', () => { if (popupBubbleWindow === win) popupBubbleWindow = null })
+  return win
+}
+
+function ensurePopupCardWindow(text, currentIdx, total) {
+  if (popupCardWindow && !popupCardWindow.isDestroyed()) {
+    popupCardWindow.webContents.send('popup-card-update', { text, currentIdx, total })
+    return popupCardWindow
+  }
+  const bounds = popupPositionLeftOfWidget(CARD_W, CARD_DEFAULT_H)
+  const win = createTransparentPopupWindow(bounds.width, bounds.height, bounds.x, bounds.y)
+  popupCardWindow = win
+  win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(makeCardHtml(text, currentIdx, total)))
+  win.once('ready-to-show', () => { if (!win.isDestroyed()) win.showInactive() })
+  win.on('closed', () => { if (popupCardWindow === win) popupCardWindow = null })
+  return win
+}
+
+ipcMain.on('popup-show-bubble', (_, opts) => {
   if (!popupModeActive) return
-  if (!payload) return
-  const w = Math.max(40, Math.min(720, Math.round(Number(payload.w) || 0)))
-  const h = Math.max(28, Math.min(720, Math.round(Number(payload.h) || 0)))
-  setWidgetSizeAnchorRight(w, h, true)
+  const style = (opts && typeof opts.style === 'string' && BUBBLE_DIMENSIONS[opts.style]) ? opts.style : 'balloon'
+  const count = Math.max(1, Math.min(9999, Number(opts && opts.count) || 1))
+  // 카드창 떠 있으면 말풍선은 안 띄움 (사용자가 본문 보는 중)
+  if (popupCardWindow && !popupCardWindow.isDestroyed()) return
+  ensurePopupBubbleWindow(style, count)
+})
+
+ipcMain.on('popup-hide-bubble', () => {
+  if (popupBubbleWindow && !popupBubbleWindow.isDestroyed()) popupBubbleWindow.close()
+  popupBubbleWindow = null
+})
+
+ipcMain.on('popup-show-card', (_, opts) => {
+  if (!popupModeActive) return
+  const text = (opts && typeof opts.text === 'string') ? opts.text.slice(0, 500) : ''
+  const currentIdx = Math.max(0, Math.round(Number(opts && opts.currentIdx) || 0))
+  const total = Math.max(1, Math.round(Number(opts && opts.total) || 1))
+  // 말풍선 떠 있으면 닫음 (카드가 같은 자리에 등장)
+  if (popupBubbleWindow && !popupBubbleWindow.isDestroyed()) popupBubbleWindow.close()
+  popupBubbleWindow = null
+  ensurePopupCardWindow(text, currentIdx, total)
+})
+
+ipcMain.on('popup-hide-card', () => {
+  if (popupCardWindow && !popupCardWindow.isDestroyed()) popupCardWindow.close()
+  popupCardWindow = null
+})
+
+// 말풍선 클릭 — 렌더러에 알림 (렌더러가 카드 열기 처리)
+ipcMain.on('popup-bubble-clicked', () => {
+  if (widgetWindow && !widgetWindow.isDestroyed()) {
+    widgetWindow.webContents.send('popup-action', 'bubble-clicked')
+  }
+})
+
+// 카드 버튼 클릭 — 렌더러에 알림 (다음/확인)
+ipcMain.on('popup-card-action', () => {
+  if (widgetWindow && !widgetWindow.isDestroyed()) {
+    widgetWindow.webContents.send('popup-action', 'card-action')
+  }
+})
+
+// 카드 내부 콘텐츠 측정 결과 — 카드창 높이 조정
+ipcMain.on('popup-card-resize', (_, payload) => {
+  if (!popupCardWindow || popupCardWindow.isDestroyed()) return
+  const h = Math.max(60, Math.min(CARD_MAX_H, Math.round(Number(payload && payload.h) || 0)))
+  const bounds = popupPositionLeftOfWidget(CARD_W, h)
+  try { popupCardWindow.setBounds(bounds) } catch {}
 })
 
 // ── 강의 목록 백업 (localStorage 손실 시 복구용) ──────────────────────────

@@ -24,10 +24,14 @@ declare global {
       flushSessionDone?: () => void
       readCoursesBackup?: () => Promise<StoredCourse[] | null>
       writeCoursesBackup?: (data: StoredCourse[]) => Promise<boolean>
-      // popup_only 모드 — 같은 위젯창 안 콘텐츠/사이즈 변경 (미니 모드 패턴)
+      // popup_only 모드 — 위젯창은 52×52 고정, 말풍선/본문 카드는 별도 BrowserWindow
       enterPopupMode?: () => void
       exitPopupMode?: () => void
-      setPopupSize?: (w: number, h: number) => void
+      showPopupBubble?: (opts: { style: string; count: number }) => void
+      hidePopupBubble?: () => void
+      showPopupCard?: (opts: { text: string; currentIdx: number; total: number }) => void
+      hidePopupCard?: () => void
+      onPopupAction?: (cb: (action: string) => void) => () => void
       isElectron: boolean
     }
   }

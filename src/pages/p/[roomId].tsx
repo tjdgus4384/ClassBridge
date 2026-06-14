@@ -86,13 +86,20 @@ export default function ProfessorDashboard() {
 
   // compact 초기값: ?compact=1 로 직접 접속할 때만 true, 기본은 큰 모드
   const [compact, setCompact] = useState(false)
-  // popup_only 모드: 라이브 중 위젯창이 작은 pill 로 축소됨. 같은 위젯창 안에서
-  // 콘텐츠/사이즈만 변경 (미니 모드 패턴). Electron 전용. 강의별 localStorage 영속.
+  // popup_only 모드: 라이브 중 위젯창은 52×52 정사각형 (복귀 버튼만).
+  // 질문 알림 말풍선과 본문 카드는 별도 BrowserWindow 로 나타남.
   type WidgetMode = 'full' | 'popup_only'
   const [widgetMode, setWidgetMode] = useState<WidgetMode>('full')
-  // popup_only 의 질문 큐 (도착 순). 화면 표시는 가장 오래된 것 우선.
+  // popup_only 의 질문 큐 (도착 순)
   const [popupQueue, setPopupQueue] = useState<Question[]>([])
-  const [popupExpanded, setPopupExpanded] = useState(false)
+  // 카드창 표시 여부 (false = 말풍선만, true = 본문 카드)
+  const [popupCardOpen, setPopupCardOpen] = useState(false)
+  // 카드창에서 현재 보고 있는 큐 인덱스
+  const [popupCardIdx, setPopupCardIdx] = useState(0)
+  // 말풍선 스타일 — 'balloon' | 'dot' | 'pill' | 'bell'. 글로벌 localStorage.
+  type BubbleStyle = 'balloon' | 'dot' | 'pill' | 'bell'
+  const [bubbleStyle, setBubbleStyle] = useState<BubbleStyle>('balloon')
+  const [bubbleStyleMenuOpen, setBubbleStyleMenuOpen] = useState(false)
   const [baseUrl, setBaseUrl] = useState('')
   const ownerTokenRef = useRef<string | null>(null)
   const contentRef = useRef<HTMLDivElement | null>(null)
@@ -125,36 +132,44 @@ export default function ProfessorDashboard() {
     }
   }, [roomId])
 
-  // popup_only 상태별 widget 창 사이즈.
-  // 세로는 항상 52 (미니 모드와 동일). 가로만 변함. 우측 끝 anchor.
-  const POPUP_TINY = { w: 52, h: 52 }       // 정사각형, 복귀 버튼만
-  const POPUP_BUBBLE = { w: 92, h: 52 }     // 왼쪽에 말풍선 + 우측 복귀
-  const POPUP_EXPANDED = { w: 320, h: 52 }  // 한 줄: 본문 + 액션 + 복귀
+  // 말풍선 스타일 복원 (글로벌 localStorage)
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('cb-bubble-style')
+      if (saved === 'balloon' || saved === 'dot' || saved === 'pill' || saved === 'bell') {
+        setBubbleStyle(saved)
+      }
+    } catch {}
+  }, [])
 
-  // 모드 변경 — localStorage 저장 + Electron 메인 동기화.
+  // 스타일 드롭다운 — 외부 클릭으로 닫기
+  useEffect(() => {
+    if (!bubbleStyleMenuOpen) return
+    const close = () => setBubbleStyleMenuOpen(false)
+    window.addEventListener('click', close)
+    return () => window.removeEventListener('click', close)
+  }, [bubbleStyleMenuOpen])
+
+  // 모드 변경 — localStorage 저장. full 복귀 시 popup 큐/카드 모두 초기화.
   const changeWidgetMode = useCallback((mode: WidgetMode) => {
     setWidgetMode(mode)
     if (typeof roomId === 'string') {
       try { localStorage.setItem(`cb-widget-mode:${roomId}`, mode) } catch {}
     }
     if (mode === 'full') {
-      // 모드 변경 시 큐/expanded 초기화 (전체 보기로 돌아가면 질문은 풀 패널에서 확인)
       setPopupQueue([])
-      setPopupExpanded(false)
+      setPopupCardOpen(false)
+      setPopupCardIdx(0)
     }
   }, [roomId])
 
-  // popup queue 의 가장 오래된 질문 dismiss (확인/다음)
-  const advancePopupQueue = useCallback(() => {
-    setPopupQueue((prev) => {
-      const next = prev.slice(1)
-      if (next.length === 0) setPopupExpanded(false)
-      return next
-    })
+  const changeBubbleStyle = useCallback((style: BubbleStyle) => {
+    setBubbleStyle(style)
+    try { localStorage.setItem('cb-bubble-style', style) } catch {}
+    setBubbleStyleMenuOpen(false)
   }, [])
 
-  // widgetMode × isLive 조합 변경 시 Electron 위젯 사이즈 동기화.
-  // 라이브 + popup_only → enterPopupMode (tiny), 그 외 (full 복귀 또는 세션 종료) → exitPopupMode.
+  // widgetMode × isLive 조합 변경 시 Electron 위젯 모드 진입/탈출.
   useEffect(() => {
     if (!isElectron) return
     const api = window.electronAPI
@@ -166,30 +181,65 @@ export default function ProfessorDashboard() {
     }
   }, [isElectron, widgetMode, isLive])
 
-  // popup_only 안에서 상태별 (tiny / bubble / expanded) 사이즈 조정 — setPopupSize IPC.
+  // 세션 종료 / 모드 변경 / 라이브 끝 시 popup 상태 정리
+  useEffect(() => {
+    if (!(widgetMode === 'popup_only' && isLive)) {
+      setPopupQueue([])
+      setPopupCardOpen(false)
+      setPopupCardIdx(0)
+    }
+  }, [widgetMode, isLive])
+
+  // ── popup_only 별도 창 (말풍선 / 카드) 상태 동기화 ──
+  // 큐 길이 > 0 이고 카드 안 열려 있으면 말풍선 표시.
+  // 큐 길이 > 0 이고 카드 열려 있으면 카드 표시 (현재 idx 의 텍스트).
+  // 큐 비면 둘 다 숨김.
   useEffect(() => {
     if (!isElectron) return
     if (!(widgetMode === 'popup_only' && isLive)) return
     const api = window.electronAPI
-    if (!api?.setPopupSize) return
-    if (popupExpanded && popupQueue.length > 0) {
-      api.setPopupSize(POPUP_EXPANDED.w, POPUP_EXPANDED.h)
-    } else if (popupQueue.length > 0) {
-      api.setPopupSize(POPUP_BUBBLE.w, POPUP_BUBBLE.h)
+    if (!api) return
+    const count = popupQueue.length
+    if (count === 0) {
+      api.hidePopupBubble?.()
+      api.hidePopupCard?.()
+      return
+    }
+    if (popupCardOpen) {
+      const idx = Math.min(popupCardIdx, count - 1)
+      api.showPopupCard?.({ text: popupQueue[idx]?.text || '', currentIdx: idx, total: count })
     } else {
-      api.setPopupSize(POPUP_TINY.w, POPUP_TINY.h)
+      api.showPopupBubble?.({ style: bubbleStyle, count })
     }
-    // size 객체들은 stable 한 상수라 의존성에서 제외 (eslint-disable 불필요)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isElectron, widgetMode, isLive, popupExpanded, popupQueue.length])
+  }, [isElectron, widgetMode, isLive, popupQueue, popupCardOpen, popupCardIdx, bubbleStyle])
 
-  // 세션 종료 / 모드 변경 / 라이브 끝 시 큐 정리
+  // ── popup 창에서 발생한 액션 listen ──
   useEffect(() => {
-    if (!(widgetMode === 'popup_only' && isLive)) {
-      setPopupQueue([])
-      setPopupExpanded(false)
-    }
-  }, [widgetMode, isLive])
+    if (!isElectron) return
+    const api = window.electronAPI
+    if (!api?.onPopupAction) return
+    const off = api.onPopupAction((action) => {
+      if (action === 'bubble-clicked') {
+        // 말풍선 클릭 → 카드 열기 (첫 질문부터)
+        setPopupCardIdx(0)
+        setPopupCardOpen(true)
+      } else if (action === 'card-action') {
+        // 카드의 "다음/확인" 버튼
+        setPopupCardIdx((prev) => {
+          const total = popupQueue.length
+          const isLast = prev >= total - 1
+          if (isLast) {
+            // 확인 → 카드 닫고 큐 비움
+            setPopupCardOpen(false)
+            setPopupQueue([])
+            return 0
+          }
+          return prev + 1
+        })
+      }
+    })
+    return () => { try { off?.() } catch {} }
+  }, [isElectron, popupQueue.length])
 
   // 위젯 모드면 body를 투명하게 — Electron transparent: true와 같이 동작.
   // 콘텐츠 컨테이너에 CSS bg-* 처리. 미니 모드만 비침, 풀/검토는 거의 불투명.
@@ -279,8 +329,7 @@ export default function ProfessorDashboard() {
     const onNewQuestion = (data: { question: Question; questionCount: number }) => {
       // 최신이 위 — prepend
       setQuestions((prev) => [data.question, ...prev])
-      // popup_only 모드 + 라이브: 같은 위젯창의 queue 에 push. 위젯이 자동으로
-      // tiny → bubble 사이즈로 확장 (size useEffect 가 처리).
+      // popup_only 모드 + 라이브: 큐에 push (말풍선 또는 카드창이 업데이트됨).
       if (widgetMode === 'popup_only' && isLive) {
         setPopupQueue((prev) => {
           if (prev.some(q => q.id === data.question.id)) return prev
@@ -550,97 +599,31 @@ export default function ProfessorDashboard() {
     if (studentUrl) navigator.clipboard.writeText(studentUrl)
   }
 
-  // ── popup_only + 라이브 ──────────────────────────────────────────────────
-  // 항상 한 줄 (h=52). 우측 끝 anchor 유지. 우측 끝 복귀 버튼은 모든 상태에서 같은 위치.
-  //   tiny     (52×52)  : 정사각형, 복귀 버튼만 (우측 끝)
-  //   bubble   (92×52)  : 왼쪽으로 확장되며 말풍선 아이콘 fade-in
-  //   expanded (320×52) : 더 왼쪽으로 확장 — 본문 한 줄 + 접기 + 다음/확인 + 복귀
-  // 전체 컨테이너 WebkitAppRegion: drag, 버튼만 no-drag — 어디서든 잡아 드래그 가능.
-  // 사이즈 자체는 main.js 의 animateWidgetBoundsTo (180ms ease-out cubic) 가 부드럽게 보간.
+  // ── popup_only + 라이브: 위젯창은 52×52 정사각형 (복귀 버튼만) ──
+  // 말풍선/본문 카드는 별도 BrowserWindow 로 위젯 옆에 나타남 (main.js 가 관리).
+  // 전체 컨테이너 WebkitAppRegion: drag, 버튼만 no-drag — 빈 공간 잡아 드래그.
   if (isLive && widgetMode === 'popup_only' && isElectron) {
-    const count = popupQueue.length
-    const current = popupQueue[0]
-    const showBubble = count > 0 && !popupExpanded
-    const showExpanded = count > 0 && popupExpanded
-
-    const ReturnBtn = (
-      <button
-        onClick={() => changeWidgetMode('full')}
-        className="flex items-center justify-center w-8 h-8 rounded-md text-white/55 hover:text-white hover:bg-white/8 transition-colors shrink-0"
-        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-        title="전체 보기로 복귀"
-      >
-        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.4} viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4" />
-        </svg>
-      </button>
-    )
-
     return (
       <>
         <Head><title>ClassBridge</title></Head>
         <div
-          className="w-screen h-screen bg-[#0a0a0a] text-white select-none flex items-center justify-end gap-1.5 px-2.5"
+          className="w-screen h-screen bg-[#0a0a0a] text-white select-none flex items-center justify-center"
           style={{
             WebkitAppRegion: 'drag',
             borderRadius: 12,
             overflow: 'hidden',
           } as React.CSSProperties}
         >
-          {showExpanded && current && (
-            <>
-              {/* 본문 — flex-1, 한 줄 truncate. expanded 등장 시 부드럽게 페이드인. */}
-              <div
-                className="flex-1 min-w-0 text-white text-[13px] font-medium truncate"
-                title={current.text}
-                style={{ animation: 'cb-popup-expand-in 220ms cubic-bezier(0.2,0.9,0.3,1) both' } as React.CSSProperties}
-              >
-                {current.text}
-              </div>
-              {count > 1 && (
-                <span
-                  className="text-[10px] text-white/40 font-mono tabular-nums shrink-0"
-                  style={{ animation: 'cb-popup-expand-in 220ms cubic-bezier(0.2,0.9,0.3,1) both' } as React.CSSProperties}
-                >
-                  1/{count}
-                </span>
-              )}
-              <button
-                onClick={() => setPopupExpanded(false)}
-                className="text-white/45 hover:text-white/85 w-7 h-7 rounded-md hover:bg-white/8 text-sm flex items-center justify-center transition-colors shrink-0"
-                style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-                title="접기"
-              >▾</button>
-              <button
-                onClick={advancePopupQueue}
-                className="bg-white text-black hover:bg-white/90 text-[11px] font-semibold px-2.5 h-7 rounded-md transition-colors shrink-0"
-                style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
-              >
-                {count > 1 ? '다음' : '확인'}
-              </button>
-            </>
-          )}
-          {showBubble && (
-            <button
-              onClick={() => setPopupExpanded(true)}
-              className="relative flex items-center justify-center w-8 h-8 rounded-md text-white/75 hover:text-white hover:bg-white/8 transition-colors shrink-0"
-              style={{
-                WebkitAppRegion: 'no-drag',
-                animation: 'cb-popup-bubble-in 240ms cubic-bezier(0.2,0.9,0.3,1) both',
-              } as React.CSSProperties}
-              title="질문 보기"
-            >
-              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H8.83l-4.42 4.42A1 1 0 0 1 3 20.71V6a2 2 0 0 1 1-2z" />
-              </svg>
-              {count > 1 && (
-                <span className="absolute -top-1 -right-1 bg-rose-500 text-white text-[9px] font-bold rounded-full min-w-[14px] h-[14px] flex items-center justify-center px-0.5 leading-none border border-[#0a0a0a]">
-                  {count > 99 ? '99+' : count}
-                </span>
-              )}
-            </button>
-          )}
-          {ReturnBtn}
+          <button
+            onClick={() => changeWidgetMode('full')}
+            className="flex items-center justify-center w-7 h-7 rounded-md text-white/55 hover:text-white hover:bg-white/8 transition-colors"
+            style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+            title="전체 보기로 복귀"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.4} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4" />
+            </svg>
+          </button>
         </div>
       </>
     )
@@ -820,15 +803,43 @@ export default function ProfessorDashboard() {
                 >
                   종료
                 </button>
-                {/* 팝업 모드 진입 — Electron 전용. 위젯이 작은 복귀 버튼으로 축소되고, 질문은 별도 풍선창. */}
+                {/* 팝업 모드 — 위젯 52×52 로 축소 + 질문은 별도 말풍선/카드 창. ▾ 로 알림 스타일 선택. */}
                 {isElectron && (
-                  <button
-                    onClick={() => changeWidgetMode('popup_only')}
-                    className="text-white/60 hover:text-white text-xs px-2 py-1 rounded-md border border-white/15 hover:border-white/30 transition-all"
-                    title="위젯을 작은 복귀 버튼으로 축소하고, 질문 도착 시에만 풍선 띄우기"
-                  >
-                    팝업
-                  </button>
+                  <div className="relative flex items-stretch">
+                    <button
+                      onClick={() => changeWidgetMode('popup_only')}
+                      className="text-white/60 hover:text-white text-xs pl-2 pr-1.5 py-1 rounded-l-md border-y border-l border-white/15 hover:border-white/30 transition-all"
+                      title="위젯을 52×52 로 축소. 질문 도착 시 별도 말풍선창 등장."
+                    >
+                      팝업
+                    </button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setBubbleStyleMenuOpen(o => !o) }}
+                      className="text-white/60 hover:text-white text-xs px-1 py-1 rounded-r-md border border-white/15 hover:border-white/30 transition-all"
+                      title="알림 스타일 선택"
+                    >▾</button>
+                    {bubbleStyleMenuOpen && (
+                      <div className="absolute top-full right-0 mt-1 bg-[#1a1a1a] border border-white/15 rounded-md py-1 shadow-xl z-50 min-w-[110px]" onClick={(e) => e.stopPropagation()}>
+                        {([
+                          { id: 'balloon' as const, label: '말풍선' },
+                          { id: 'dot' as const, label: '점 + 펄스' },
+                          { id: 'pill' as const, label: '알약' },
+                          { id: 'bell' as const, label: '종 흔들림' },
+                        ]).map(opt => (
+                          <button
+                            key={opt.id}
+                            onClick={() => changeBubbleStyle(opt.id)}
+                            className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
+                              bubbleStyle === opt.id ? 'text-white bg-white/10' : 'text-white/70 hover:text-white hover:bg-white/5'
+                            }`}
+                          >
+                            {opt.label}
+                            {bubbleStyle === opt.id && <span className="ml-2 text-white/60">✓</span>}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 )}
                 <button
                   onClick={() => handleToggleCompact(true)}

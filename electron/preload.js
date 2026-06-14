@@ -21,10 +21,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 강의 목록 백업 — userData/courses.json
   readCoursesBackup: () => ipcRenderer.invoke('read-courses-backup'),
   writeCoursesBackup: (data) => ipcRenderer.invoke('write-courses-backup', data),
-  // ── popup_only 모드 — 같은 위젯창 안에서 콘텐츠 + 사이즈만 변경 (미니 모드 패턴) ──
+  // ── popup_only 모드 ─────────────────────────────────────────────────────
+  // 위젯창은 popup 모드 동안 52×52 고정. 말풍선/본문은 별도 BrowserWindow 로 관리.
   enterPopupMode: () => ipcRenderer.send('enter-popup-mode'),
   exitPopupMode: () => ipcRenderer.send('exit-popup-mode'),
-  // 렌더러가 tiny / bubble / expanded 상태 전환 시 호출
-  setPopupSize: (w, h) => ipcRenderer.send('set-popup-size', { w, h }),
+  // 말풍선창 show/hide (style + count)
+  showPopupBubble: (opts) => ipcRenderer.send('popup-show-bubble', opts || {}),
+  hidePopupBubble: () => ipcRenderer.send('popup-hide-bubble'),
+  // 본문 카드창 show/hide/update (text + currentIdx + total)
+  showPopupCard: (opts) => ipcRenderer.send('popup-show-card', opts || {}),
+  hidePopupCard: () => ipcRenderer.send('popup-hide-card'),
+  // 말풍선 클릭 / 카드 액션 등 popup 창에서 발생한 이벤트 listen
+  onPopupAction: (cb) => {
+    const handler = (_e, action) => cb(action)
+    ipcRenderer.on('popup-action', handler)
+    return () => ipcRenderer.removeListener('popup-action', handler)
+  },
   isElectron: true,
 })
