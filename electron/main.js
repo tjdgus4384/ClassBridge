@@ -380,8 +380,8 @@ function popupPositionForCard(w, h) {
   }
   if (widgetWindow && !widgetWindow.isDestroyed()) {
     const wb = widgetWindow.getBounds()
-    // mini 위젯 아래에 우측 끝 정렬로 배치
-    const x = wb.x + wb.width - w
+    // mini 위젯 아래에 가로 중앙 정렬로 배치
+    const x = wb.x + Math.round((wb.width - w) / 2)
     const y = wb.y + wb.height + POPUP_GAP
     return clampToDisplay(x, y, w, h, wb)
   }
