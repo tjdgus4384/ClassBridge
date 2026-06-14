@@ -1,0 +1,52 @@
+# Dependencies — 컨테이너 안에서 npm ci 로 다시 설치되니 보낼 필요 없음
+node_modules
+electron/node_modules
+
+# Build artifacts — 컨테이너 안에서 새로 빌드
+.next
+out
+build
+dist
+dist-electron
+
+# Electron 데스크톱 앱 — fly 서버에 필요 없음
+electron
+
+# Git
+.git
+.gitignore
+.gitattributes
+.github
+
+# Environment / secrets — fly secrets 로 따로 주입
+.env
+.env.*
+
+# Docker 자체
+.dockerignore
+Dockerfile
+
+# OS / editor / 로그
+.DS_Store
+Thumbs.db
+.vscode
+.idea
+*.swp
+*.swo
+*.log
+npm-debug.log*
+
+# 배포 산출물
+*.dmg
+*.exe
+*.AppImage
+*.zip
+*.snap
+*.blockmap
+
+# 잡다
+*.bak
+tsconfig.tsbuildinfo
+README.md
+nixpacks.toml
+fly.toml
