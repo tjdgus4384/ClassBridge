@@ -303,14 +303,14 @@ ipcMain.on('set-live-size', (_, payload) => {
 // 그 자리에 띄움. 말풍선/본문 카드도 별도 BrowserWindow.
 // 모든 popup 창의 위치 anchor = 메인 위젯 (popup 모드 동안엔 popupReturnWindow) 의
 // 왼쪽 옆.
-const POPUP_TINY_W = 44
-const POPUP_TINY_H = 44
+const POPUP_TINY_W = 72
+const POPUP_TINY_H = 72
 const POPUP_GAP = 8                 // 위젯 ↔ 말풍선/카드 간 간격
 const CARD_W = 312                  // 본문 280 + 양옆 16px 그림자 buffer
-const CARD_DEFAULT_H = 140          // 카드 처음 등장 시 임시 높이 — ResizeObserver 가 조정
+const CARD_DEFAULT_H = 110          // 카드 처음 등장 시 임시 높이 — ResizeObserver 가 조정
 const CARD_MAX_H = 320
-const BUBBLE_W = 44                 // 말풍선 (흰 원 + Sea Blue 배지) 단일 스타일
-const BUBBLE_H = 44
+const BUBBLE_W = 72                 // 말풍선 (흰 원 + Sea Blue 배지) — 콘텐츠 36 + 그림자 buffer 18×2
+const BUBBLE_H = 72
 const RETURN_MARGIN = 20            // 화면 우상단에서 복귀 버튼 까지의 여백
 let popupModeActive = false
 let savedWidgetBounds = null
@@ -521,6 +521,8 @@ render();
 }
 
 // ── 본문 카드창 — 폭 280 고정, 높이 가변 (ResizeObserver 가 main 에 요청) ──
+// 헤더 행 없음. 본문 텍스트와 액션 버튼이 같은 flex 컨테이너 안.
+// align-items: flex-end → 버튼이 본문 마지막 줄과 같은 수직선에.
 function makeCardHtml(initialText, initialIdx, initialTotal) {
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title></title>
 <style>
@@ -531,32 +533,29 @@ function makeCardHtml(initialText, initialIdx, initialTotal) {
   #card{position:fixed;left:16px;right:16px;top:16px;
     background:#fff;border-radius:14px;
     box-shadow:0 6px 16px rgba(0,0,0,0.20),0 1px 3px rgba(0,0,0,0.10);
-    padding:13px 15px 12px;display:flex;flex-direction:column;gap:10px;
+    padding:14px 16px 14px 18px;
+    display:flex;align-items:flex-end;gap:10px;
     animation:cb-card-in 0.3s cubic-bezier(0.2,0.9,0.3,1) both;}
   @keyframes cb-card-in{
     from{opacity:0;transform:translateX(18px) scale(0.96);}
     to{opacity:1;transform:translateX(0) scale(1);}
   }
-  .head{display:flex;align-items:center;gap:6px;
-    color:rgba(0,0,0,0.45);font-size:11px;font-weight:600;letter-spacing:0.02em;}
-  .head .dot{width:6px;height:6px;border-radius:50%;background:#10b981;}
-  .text{color:#171717;font-size:14px;font-weight:500;line-height:1.5;
-    word-break:break-word;}
-  .act{display:flex;justify-content:flex-end;margin-top:2px;}
-  .btn{background:#0a0a0a;color:#fff;border:0;padding:7px 16px;border-radius:8px;
-    font-size:12.5px;font-weight:600;cursor:pointer;transition:background 0.15s ease;
-    letter-spacing:0.01em;}
+  .text{flex:1;min-width:0;color:#171717;font-size:14px;font-weight:500;
+    line-height:1.5;word-break:break-word;}
+  .btn{flex-shrink:0;background:#0a0a0a;color:#fff;border:0;
+    padding:5px 13px;border-radius:7px;
+    font-size:12px;font-weight:600;cursor:pointer;
+    transition:background 0.15s ease;line-height:1.3;letter-spacing:0.01em;}
   .btn:hover{background:#262626;}
   /* V 체크 — 마지막 질문 확인 시 원형 아이콘 버튼 */
-  .btn.check{width:36px;height:36px;padding:0;border-radius:50%;
+  .btn.check{width:28px;height:28px;padding:0;border-radius:50%;
     display:inline-flex;align-items:center;justify-content:center;}
-  .btn.check svg{width:16px;height:16px;}
+  .btn.check svg{width:14px;height:14px;}
 </style></head>
 <body>
 <div id="card">
-  <div class="head"><span class="dot"></span><span id="cnt"></span></div>
-  <div class="text" id="text"></div>
-  <div class="act"><button class="btn" id="btn"></button></div>
+  <span class="text" id="text"></span>
+  <button class="btn" id="btn"></button>
 </div>
 <script>
   var text = ${JSON.stringify(initialText)};
@@ -564,14 +563,12 @@ function makeCardHtml(initialText, initialIdx, initialTotal) {
   var total = ${Number(initialTotal) || 1};
   var card = document.getElementById('card');
   var elText = document.getElementById('text');
-  var elCnt = document.getElementById('cnt');
   var elBtn = document.getElementById('btn');
   var CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"/></svg>';
 
   function render(){
     var isLast = currentIdx >= total - 1;
     elText.textContent = text;
-    elCnt.textContent = total > 1 ? ((currentIdx + 1) + ' / ' + total) : '질문';
     if(isLast){
       elBtn.className = 'btn check';
       elBtn.innerHTML = CHECK_SVG;
@@ -581,7 +578,6 @@ function makeCardHtml(initialText, initialIdx, initialTotal) {
       elBtn.textContent = '다음';
       elBtn.removeAttribute('aria-label');
     }
-    // resize 알림 — 다음 frame 에 (텍스트 layout 완료 후)
     requestAnimationFrame(notifyResize);
   }
   function notifyResize(){
@@ -600,7 +596,6 @@ function makeCardHtml(initialText, initialIdx, initialTotal) {
       render();
     });
   }
-  // 본문 카드 어느 영역이든 클릭 시 close 는 아니고 — 명시적 버튼만.
   render();
 </script>
 </body></html>`
