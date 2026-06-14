@@ -167,6 +167,12 @@ function createWidgetWindow(roomId, ownerToken) {
     widgetWindow = null
     widgetClosing = false
     isLiveSession = false  // 다음 위젯 진입 시 stale 상태로 confirm 뜨지 않도록
+    popupModeActive = false
+    savedWidgetBounds = null
+    // 떠있던 질문 풍선들 정리
+    for (const p of [...activePopupWindows]) {
+      if (!p.isDestroyed()) p.close()
+    }
     // 위젯 닫혔으면 랜딩으로 복귀 (앱 종료 중이면 skip)
     if (isAppQuitting) return
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show()
@@ -281,6 +287,244 @@ ipcMain.on('set-live-size', (_, payload) => {
   widgetWindow.setMinimumSize(0, 0)
   widgetWindow.setMaximumSize(0, 0)
   widgetWindow.setBounds({ x: newX, y: newY, width: newWidth, height: newHeight })
+})
+
+// ── popup_only 모드 ─────────────────────────────────────────────────────────
+// 위젯창 자체를 48×48 의 작은 "복귀 버튼" 창으로 축소.
+// 질문 도착 시 화면 왼쪽에 별도 BrowserWindow 풍선창 생성, 10초 후 자동 소멸.
+// 사용자는 작은 복귀 버튼 또는 풍선의 ▢ 버튼 으로 전체 보기로 돌아옴.
+const POPUP_RETURN_W = 48
+const POPUP_RETURN_H = 48
+const QUESTION_POPUP_W = 360
+const QUESTION_POPUP_H = 100
+const QUESTION_POPUP_GAP = 8
+const QUESTION_POPUP_MARGIN = 20
+const QUESTION_POPUP_TTL_MS = 10_000
+const MAX_CONCURRENT_POPUPS = 3
+let popupModeActive = false
+let savedWidgetBounds = null   // popup 진입 직전 위젯 사이즈 — 복귀 시 우선 사용
+const activePopupWindows = new Set()
+
+function clampToDisplay(x, y, w, h, refBounds) {
+  const display = screen.getDisplayMatching(refBounds || { x, y, width: w, height: h }).workArea
+  const nx = Math.max(display.x, Math.min(x, display.x + display.width - w))
+  const ny = Math.max(display.y, Math.min(y, display.y + display.height - h))
+  return { x: nx, y: ny, width: w, height: h }
+}
+
+ipcMain.on('enter-popup-mode', () => {
+  if (!widgetWindow || widgetWindow.isDestroyed()) return
+  if (widgetClosing) return
+  if (popupModeActive) return
+  popupModeActive = true
+  savedWidgetBounds = widgetWindow.getBounds()
+  const cur = savedWidgetBounds
+  const oldRight = cur.x + cur.width
+  // 우측 끝 고정 (다른 사이즈 변경과 같은 패턴)
+  const bounds = clampToDisplay(oldRight - POPUP_RETURN_W, cur.y, POPUP_RETURN_W, POPUP_RETURN_H, cur)
+  widgetWindow.setResizable(true)
+  widgetWindow.setMinimumSize(POPUP_RETURN_W, POPUP_RETURN_H)
+  widgetWindow.setMaximumSize(POPUP_RETURN_W, POPUP_RETURN_H)
+  widgetWindow.setBounds(bounds)
+  widgetWindow.setResizable(false)
+})
+
+ipcMain.on('exit-popup-mode', () => {
+  if (!widgetWindow || widgetWindow.isDestroyed()) return
+  popupModeActive = false
+  // 모든 질문 풍선 즉시 정리
+  for (const p of [...activePopupWindows]) {
+    if (!p.isDestroyed()) p.close()
+  }
+  // 위젯 사이즈 복원 — 저장된 bounds 우선, 없으면 라이브 임시 사이즈.
+  // 렌더러의 setLiveSize useEffect 가 곧이어 본문 높이로 미세 조정함.
+  const cur = widgetWindow.getBounds()
+  const oldRight = cur.x + cur.width
+  const targetW = savedWidgetBounds?.width || MINI_W
+  const targetH = savedWidgetBounds?.height || LIVE_TEMP_HEIGHT
+  const bounds = clampToDisplay(oldRight - targetW, cur.y, targetW, targetH, cur)
+  widgetWindow.setResizable(true)
+  widgetWindow.setMinimumSize(0, 0)
+  widgetWindow.setMaximumSize(0, 0)
+  widgetWindow.setBounds(bounds)
+  savedWidgetBounds = null
+})
+
+// 질문 본문 → 안전한 HTML escape (data: URL 안에 박힘)
+function escHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])
+  )
+}
+
+function makeQuestionPopupHtml(text, ttlMs) {
+  const safe = escHtml(text || '')
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title></title>
+<style>
+  html,body{margin:0;padding:0;background:transparent;
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    overflow:hidden;-webkit-user-select:none;user-select:none;}
+  .wrap{position:fixed;inset:6px;animation:in 0.28s cubic-bezier(0.2,0.9,0.3,1) both;}
+  @keyframes in{
+    from{opacity:0;transform:translateX(-16px);}
+    to{opacity:1;transform:translateX(0);}
+  }
+  @keyframes out{
+    from{opacity:1;transform:translateX(0);}
+    to{opacity:0;transform:translateX(-16px);}
+  }
+  .wrap.closing{animation:out 0.18s ease-in forwards;}
+  .card{background:#fff;border-radius:16px;
+    box-shadow:0 10px 28px rgba(0,0,0,0.28),0 2px 6px rgba(0,0,0,0.14);
+    padding:14px 14px 16px;display:flex;align-items:flex-start;gap:11px;
+    position:relative;overflow:hidden;height:100%;box-sizing:border-box;}
+  .icon{font-size:18px;line-height:1.2;flex-shrink:0;margin-top:2px;}
+  .text{flex:1;font-size:14px;line-height:1.45;color:#171717;font-weight:500;
+    word-break:break-word;display:-webkit-box;-webkit-line-clamp:3;
+    -webkit-box-orient:vertical;overflow:hidden;}
+  .actions{display:flex;flex-direction:column;gap:5px;flex-shrink:0;}
+  .btn{width:26px;height:26px;border:none;background:rgba(0,0,0,0.05);
+    border-radius:8px;cursor:pointer;display:flex;align-items:center;
+    justify-content:center;font-size:12px;color:rgba(0,0,0,0.55);
+    transition:background 0.15s,color 0.15s;padding:0;line-height:1;}
+  .btn:hover{background:rgba(0,0,0,0.1);color:rgba(0,0,0,0.9);}
+  .cd{position:absolute;bottom:0;left:14px;right:14px;height:2.5px;
+    background:#34d399;border-radius:2px;transform-origin:left center;
+    animation:shrink ${ttlMs}ms linear forwards;}
+  @keyframes shrink{from{transform:scaleX(1);}to{transform:scaleX(0);}}
+</style></head>
+<body>
+  <div class="wrap" id="wrap">
+    <div class="card">
+      <span class="icon">💬</span>
+      <div class="text">${safe}</div>
+      <div class="actions">
+        <button class="btn" id="revert" title="전체 보기로 복귀">▢</button>
+        <button class="btn" id="dismiss" title="닫기">✕</button>
+      </div>
+      <div class="cd"></div>
+    </div>
+  </div>
+  <script>
+    function fadeOutThen(fn){
+      var w=document.getElementById('wrap');
+      w.classList.add('closing');
+      setTimeout(fn,180);
+    }
+    document.getElementById('dismiss').addEventListener('click',function(){
+      fadeOutThen(function(){ window.popupAPI && window.popupAPI.dismiss && window.popupAPI.dismiss(); });
+    });
+    document.getElementById('revert').addEventListener('click',function(){
+      fadeOutThen(function(){ window.popupAPI && window.popupAPI.revertToWidget && window.popupAPI.revertToWidget(); });
+    });
+  </script>
+</body></html>`
+}
+
+function spawnQuestionPopup({ text, qid }) {
+  // 최대 동시 풍선 수 — 가장 오래된 것부터 닫음
+  while (activePopupWindows.size >= MAX_CONCURRENT_POPUPS) {
+    const oldest = activePopupWindows.values().next().value
+    if (oldest && !oldest.isDestroyed()) oldest.close()
+    else activePopupWindows.delete(oldest)
+  }
+  // 빈 슬롯 인덱스 — 기존 풍선이 차지한 idx 들 빼고 가장 작은 번호
+  const used = new Set()
+  for (const p of activePopupWindows) {
+    if (typeof p._popupIndex === 'number') used.add(p._popupIndex)
+  }
+  let idx = 0
+  while (used.has(idx)) idx++
+
+  // 풍선은 복귀 버튼(축소된 위젯) 바로 옆 — 위젯 왼쪽에 부착.
+  // 위젯이 오른쪽 끝에 있는 표준 케이스에서 풍선은 화면 우상단 영역에 부착됨.
+  const widgetBounds = (widgetWindow && !widgetWindow.isDestroyed())
+    ? widgetWindow.getBounds()
+    : null
+  let targetX, targetY
+  if (widgetBounds) {
+    targetX = widgetBounds.x - QUESTION_POPUP_W - QUESTION_POPUP_GAP
+    targetY = widgetBounds.y + idx * (QUESTION_POPUP_H + QUESTION_POPUP_GAP)
+  } else {
+    // fallback — 위젯 못 찾으면 우상단
+    const d = screen.getPrimaryDisplay().workArea
+    targetX = d.x + d.width - QUESTION_POPUP_W - QUESTION_POPUP_MARGIN
+    targetY = d.y + QUESTION_POPUP_MARGIN + idx * (QUESTION_POPUP_H + QUESTION_POPUP_GAP)
+  }
+  const refBounds = widgetBounds || { x: targetX, y: targetY, width: QUESTION_POPUP_W, height: QUESTION_POPUP_H }
+  const bounds = clampToDisplay(targetX, targetY, QUESTION_POPUP_W, QUESTION_POPUP_H, refBounds)
+
+  const popup = new BrowserWindow({
+    width: bounds.width,
+    height: bounds.height,
+    x: bounds.x,
+    y: bounds.y,
+    frame: false,
+    transparent: true,
+    backgroundColor: '#00000000',
+    alwaysOnTop: true,
+    hasShadow: true,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    skipTaskbar: true,
+    focusable: false,    // PPT focus 안 뺏기
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'popup-preload.js'),
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      backgroundThrottling: false,
+    },
+  })
+  popup.setAlwaysOnTop(true, 'screen-saver')
+  popup._popupIndex = idx
+  popup._qid = qid
+  activePopupWindows.add(popup)
+
+  const html = makeQuestionPopupHtml(text, QUESTION_POPUP_TTL_MS)
+  popup.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
+  popup.once('ready-to-show', () => {
+    if (!popup.isDestroyed()) popup.showInactive()
+  })
+  popup.on('closed', () => {
+    activePopupWindows.delete(popup)
+  })
+
+  // 자동 소멸 안전망 — CSS shrink 종료 + fade-out 후
+  setTimeout(() => {
+    if (!popup.isDestroyed()) popup.close()
+  }, QUESTION_POPUP_TTL_MS + 400)
+}
+
+ipcMain.on('show-question-popup', (_, payload) => {
+  if (!payload || typeof payload.text !== 'string' || !payload.text.trim()) return
+  if (!popupModeActive) return     // popup 모드 아닐 땐 무시 (이중 안전)
+  spawnQuestionPopup({
+    text: payload.text.slice(0, 200),
+    qid: typeof payload.qid === 'string' ? payload.qid : '',
+  })
+})
+
+// 풍선의 ✕ — 이 풍선만 닫음
+ipcMain.on('popup-dismiss', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (win && !win.isDestroyed()) win.close()
+})
+
+// 풍선의 ▢ — 모든 풍선 닫고 위젯을 전체 보기로 되돌림
+ipcMain.on('popup-revert-to-widget', (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (win && !win.isDestroyed()) win.close()
+  for (const p of [...activePopupWindows]) {
+    if (!p.isDestroyed()) p.close()
+  }
+  if (widgetWindow && !widgetWindow.isDestroyed()) {
+    widgetWindow.webContents.send('popup-revert')
+    widgetWindow.show()
+    widgetWindow.focus()
+  }
 })
 
 // ── 강의 목록 백업 (localStorage 손실 시 복구용) ──────────────────────────

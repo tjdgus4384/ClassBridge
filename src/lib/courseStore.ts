@@ -24,6 +24,11 @@ declare global {
       flushSessionDone?: () => void
       readCoursesBackup?: () => Promise<StoredCourse[] | null>
       writeCoursesBackup?: (data: StoredCourse[]) => Promise<boolean>
+      // popup_only 모드 — 위젯 축소 / 별도 질문 풍선창 / 복귀 신호
+      enterPopupMode?: () => void
+      exitPopupMode?: () => void
+      showQuestionPopup?: (text: string, qid: string) => void
+      onPopupRevert?: (cb: () => void) => () => void
       isElectron: boolean
     }
   }

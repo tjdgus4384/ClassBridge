@@ -86,6 +86,10 @@ export default function ProfessorDashboard() {
 
   // compact 초기값: ?compact=1 로 직접 접속할 때만 true, 기본은 큰 모드
   const [compact, setCompact] = useState(false)
+  // popup_only 모드: 라이브 중 위젯창을 작은 복귀 버튼으로 축소, 질문은 별도 풍선창으로.
+  // 강의별 localStorage 영속. Electron 전용.
+  type WidgetMode = 'full' | 'popup_only'
+  const [widgetMode, setWidgetMode] = useState<WidgetMode>('full')
   const [baseUrl, setBaseUrl] = useState('')
   const ownerTokenRef = useRef<string | null>(null)
   const contentRef = useRef<HTMLDivElement | null>(null)
@@ -109,7 +113,46 @@ export default function ProfessorDashboard() {
         if (t) ownerTokenRef.current = t
       } catch {}
     }
+    // 위젯 모드 복원 — 강의별로 기억.
+    if (typeof roomId === 'string') {
+      try {
+        const saved = localStorage.getItem(`cb-widget-mode:${roomId}`)
+        if (saved === 'full' || saved === 'popup_only') setWidgetMode(saved)
+      } catch {}
+    }
   }, [roomId])
+
+  // 모드 변경 — localStorage 저장 + Electron 메인 동기화.
+  // 라이브 중에 popup_only 진입 → 위젯 축소 IPC. full 복귀 → 위젯 복원 IPC.
+  // 라이브 아닐 때 모드 바꿔도 위젯 사이즈는 그대로 (라이브 진입 시점에 적용).
+  const changeWidgetMode = useCallback((mode: WidgetMode) => {
+    setWidgetMode(mode)
+    if (typeof roomId === 'string') {
+      try { localStorage.setItem(`cb-widget-mode:${roomId}`, mode) } catch {}
+    }
+  }, [roomId])
+
+  // 풍선의 ▢ 또는 다른 경로로 popup 모드 탈출 신호 — 모드 상태 동기화.
+  useEffect(() => {
+    if (!isElectron) return
+    const off = window.electronAPI?.onPopupRevert?.(() => {
+      changeWidgetMode('full')
+    })
+    return () => { try { off?.() } catch {} }
+  }, [isElectron, changeWidgetMode])
+
+  // widgetMode × isLive 조합 변경 시 Electron 위젯 사이즈 동기화.
+  // 라이브 중 popup_only → enterPopupMode, 그 외 (full 복귀 또는 세션 종료) → exitPopupMode.
+  useEffect(() => {
+    if (!isElectron) return
+    const api = window.electronAPI
+    if (!api) return
+    if (widgetMode === 'popup_only' && isLive) {
+      api.enterPopupMode?.()
+    } else {
+      api.exitPopupMode?.()
+    }
+  }, [isElectron, widgetMode, isLive])
 
   // 위젯 모드면 body를 투명하게 — Electron transparent: true와 같이 동작.
   // 콘텐츠 컨테이너에 CSS bg-* 처리. 미니 모드만 비침, 풀/검토는 거의 불투명.
@@ -199,6 +242,12 @@ export default function ProfessorDashboard() {
     const onNewQuestion = (data: { question: Question; questionCount: number }) => {
       // 최신이 위 — prepend
       setQuestions((prev) => [data.question, ...prev])
+      // popup_only 모드 + Electron: 별도 풍선 창으로 띄움 (위젯 자체는 축소된 상태).
+      if (widgetMode === 'popup_only' && isLive && isElectron) {
+        try { window.electronAPI?.showQuestionPopup?.(data.question.text, data.question.id) } catch {}
+        // unread 뱃지/pulse 는 무관 — 본문이 안 보이는 화면이라 무의미.
+        return
+      }
       // "실제로 화면에 보이는가" = 풀 모드 + 패널 open. 미니거나 패널 닫혀있으면 안 보이는 것과 동일.
       const visible = !compact && questionsOpen
       if (!visible) {
@@ -260,7 +309,7 @@ export default function ProfessorDashboard() {
       socket.off('session-ended', onSessionEnded)
       socket.off('archived-deleted', onArchivedDeleted)
     }
-  }, [roomId, questionsOpen, compact])
+  }, [roomId, questionsOpen, compact, widgetMode, isLive, isElectron])
 
   // 풀 모드 + 패널 open 상태가 되면 unread 자동 클리어.
   // 미니에서 풀로 돌아왔을 때 (패널은 이전부터 open 상태)도 동일하게 처리.
@@ -347,9 +396,11 @@ export default function ProfessorDashboard() {
   }, [isElectron])
 
   // ── 라이브 모드: 위젯 폭은 미니와 동일(288), 본문 높이는 콘텐츠에 맞춰 동적 ──
-  // 검토 모드면 풀 사이즈(460×720)로 복원. 미니면 main이 무시.
+  // 검토 모드면 풀 사이즈(460×720)로 복원. 미니/popup_only 면 main 이 따로 처리.
   useEffect(() => {
     if (!isElectron || compact) return
+    // popup_only + 라이브 — 위젯은 48×48 복귀 버튼 크기로 main 이 관리. 본문 높이 IPC 무시.
+    if (widgetMode === 'popup_only' && isLive) return
     const api = window.electronAPI
     if (!api?.setLiveSize) return
 
@@ -379,7 +430,7 @@ export default function ProfessorDashboard() {
       if (raf) cancelAnimationFrame(raf)
       ro.disconnect()
     }
-  }, [isElectron, isLive, compact, bootstrapped, questionsOpen])
+  }, [isElectron, isLive, compact, bootstrapped, questionsOpen, widgetMode])
 
   // 라이브 종료되면 미니 모드 자동 해제
   useEffect(() => {
@@ -456,6 +507,27 @@ export default function ProfessorDashboard() {
 
   const copyLink = () => {
     if (studentUrl) navigator.clipboard.writeText(studentUrl)
+  }
+
+  // ── popup_only + 라이브: 위젯창은 48×48 작은 복귀 버튼만. 본문 일체 없음. ──
+  // 클릭 시 widgetMode='full' 로 복귀 → 메인이 위젯 원래 사이즈로 확대 + 떠있던 풍선 정리.
+  if (isLive && widgetMode === 'popup_only' && isElectron) {
+    return (
+      <>
+        <Head><title>ClassBridge</title></Head>
+        <div className="w-screen h-screen flex items-center justify-center select-none" style={{ background: 'transparent' }}>
+          <button
+            onClick={() => changeWidgetMode('full')}
+            className="w-11 h-11 rounded-full bg-black/65 backdrop-blur-2xl border border-white/15 text-white/70 hover:text-white hover:bg-black/80 transition-all flex items-center justify-center shadow-lg"
+            title="전체 보기로 복귀"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+            </svg>
+          </button>
+        </div>
+      </>
+    )
   }
 
   // ── Compact (overlay) mode ──────────────────────────────────────────────
@@ -632,6 +704,16 @@ export default function ProfessorDashboard() {
                 >
                   종료
                 </button>
+                {/* 팝업 모드 진입 — Electron 전용. 위젯이 작은 복귀 버튼으로 축소되고, 질문은 별도 풍선창. */}
+                {isElectron && (
+                  <button
+                    onClick={() => changeWidgetMode('popup_only')}
+                    className="text-white/60 hover:text-white text-xs px-2 py-1 rounded-md border border-white/15 hover:border-white/30 transition-all"
+                    title="위젯을 작은 복귀 버튼으로 축소하고, 질문 도착 시에만 풍선 띄우기"
+                  >
+                    팝업
+                  </button>
+                )}
                 <button
                   onClick={() => handleToggleCompact(true)}
                   className="text-white/60 hover:text-white text-xs px-2 py-1 rounded-md border border-white/15 hover:border-white/30 transition-all"
