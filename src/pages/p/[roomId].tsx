@@ -96,8 +96,8 @@ export default function ProfessorDashboard() {
   const [popupCardOpen, setPopupCardOpen] = useState(false)
   // 카드창에서 현재 보고 있는 큐 인덱스
   const [popupCardIdx, setPopupCardIdx] = useState(0)
-  // 말풍선 스타일 — 'balloon' | 'dot' | 'pill' | 'bell'. 글로벌 localStorage.
-  type BubbleStyle = 'balloon' | 'dot' | 'pill' | 'bell'
+  // 말풍선 스타일 — 'balloon' | 'pill' | 'bell'. 글로벌 localStorage.
+  type BubbleStyle = 'balloon' | 'pill' | 'bell'
   const [bubbleStyle, setBubbleStyle] = useState<BubbleStyle>('balloon')
   const [bubbleStyleMenuOpen, setBubbleStyleMenuOpen] = useState(false)
   const [baseUrl, setBaseUrl] = useState('')
@@ -136,7 +136,7 @@ export default function ProfessorDashboard() {
   useEffect(() => {
     try {
       const saved = localStorage.getItem('cb-bubble-style')
-      if (saved === 'balloon' || saved === 'dot' || saved === 'pill' || saved === 'bell') {
+      if (saved === 'balloon' || saved === 'pill' || saved === 'bell') {
         setBubbleStyle(saved)
       }
     } catch {}
@@ -822,7 +822,6 @@ export default function ProfessorDashboard() {
                       <div className="absolute top-full right-0 mt-1 bg-[#1a1a1a] border border-white/15 rounded-md py-1 shadow-xl z-50 min-w-[110px]" onClick={(e) => e.stopPropagation()}>
                         {([
                           { id: 'balloon' as const, label: '말풍선' },
-                          { id: 'dot' as const, label: '점 + 펄스' },
                           { id: 'pill' as const, label: '알약' },
                           { id: 'bell' as const, label: '종 흔들림' },
                         ]).map(opt => (

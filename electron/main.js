@@ -390,10 +390,9 @@ function escHtmlPopup(s) {
   )
 }
 
-// ── 말풍선창 — 4가지 스타일 (balloon / dot / pill / bell) inline JS 분기 ──
+// ── 말풍선창 — 3가지 스타일 (balloon / pill / bell) inline JS 분기 ──
 const BUBBLE_DIMENSIONS = {
   balloon: { w: 88, h: 44 },
-  dot:     { w: 44, h: 24 },
   pill:    { w: 130, h: 36 },
   bell:    { w: 44, h: 44 },
 }
@@ -427,23 +426,7 @@ function makeBubbleHtml(initialStyle, initialCount) {
     100%{opacity:1;transform:translateX(0) scale(1);}
   }
 
-  /* B. floating-dot */
-  .dot-wrap{display:flex;align-items:center;gap:6px;
-    animation:cb-dot-in 0.32s ease-out both;}
-  .dot{position:relative;width:12px;height:12px;border-radius:50%;background:#ef4444;
-    box-shadow:0 0 0 0 rgba(239,68,68,0.6);}
-  .dot::before{content:'';position:absolute;inset:-2px;border-radius:50%;
-    background:rgba(239,68,68,0.55);animation:cb-dot-pulse 1.6s ease-out infinite;z-index:-1;}
-  .dot-wrap .cnt{background:rgba(10,10,10,0.92);color:#fff;border-radius:8px;
-    padding:2px 7px;font-size:10.5px;font-weight:700;
-    box-shadow:0 2px 8px rgba(0,0,0,0.35);font-variant-numeric:tabular-nums;}
-  @keyframes cb-dot-pulse{
-    0%{transform:scale(1);opacity:0.9;}
-    100%{transform:scale(2.6);opacity:0;}
-  }
-  @keyframes cb-dot-in{from{opacity:0;transform:scale(0);}to{opacity:1;transform:scale(1);}}
-
-  /* C. attention-pill */
+  /* B. attention-pill */
   .pill{background:rgba(10,10,10,0.85);backdrop-filter:blur(20px);
     -webkit-backdrop-filter:blur(20px);
     border:1px solid rgba(255,255,255,0.08);color:#fff;border-radius:18px;
@@ -466,13 +449,13 @@ function makeBubbleHtml(initialStyle, initialCount) {
     50%{box-shadow:0 6px 18px rgba(0,0,0,0.35),0 0 0 5px rgba(239,68,68,0.18);}
   }
 
-  /* D. bouncing-bell */
+  /* C. bouncing-bell — 새 질문 도착할 때마다 한 번만 흔들림 */
   .bell-wrap{position:relative;width:36px;height:36px;display:flex;
     align-items:center;justify-content:center;background:rgba(10,10,10,0.92);
     border-radius:50%;box-shadow:0 4px 14px rgba(0,0,0,0.32);
     animation:cb-bell-in 0.32s ease-out both;}
-  .bell-wrap svg{width:20px;height:20px;color:#fbbf24;
-    animation:cb-bell-swing 2.2s ease-in-out infinite;transform-origin:top center;}
+  .bell-wrap svg{width:20px;height:20px;color:#fbbf24;transform-origin:top center;}
+  .bell-wrap.swing svg{animation:cb-bell-swing 0.85s ease-in-out;}
   .bell-wrap .cnt{position:absolute;top:-4px;right:-4px;background:#ef4444;color:#fff;
     min-width:18px;height:18px;border-radius:9px;display:flex;align-items:center;
     justify-content:center;font-size:10.5px;font-weight:700;padding:0 4px;
@@ -500,32 +483,48 @@ function makeBubbleHtml(initialStyle, initialCount) {
       html = '<div class="balloon"><span class="ic">💬</span>' +
         (count > 1 ? '<span class="cnt">' + n + '</span>' : '<span class="lbl">새 질문</span>') +
         '</div>';
-    } else if(style === 'dot'){
-      html = '<div class="dot-wrap"><span class="dot"></span>' +
-        (count > 1 ? '<span class="cnt">' + n + '</span>' : '') +
-        '</div>';
     } else if(style === 'pill'){
       html = '<div class="pill"><span class="ic">💬</span>' +
         '<span class="lbl">새 질문</span>' +
         '<span class="cnt">' + n + '</span></div>';
     } else if(style === 'bell'){
-      html = '<div class="bell-wrap">' +
+      html = '<div class="bell-wrap" id="bw">' +
         '<svg fill="currentColor" viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.63-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.64 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>' +
         '<span class="cnt">' + n + '</span></div>';
     }
     root.innerHTML = html;
+  }
+  // 종 흔들림 1회 트리거 — class swing 을 잠깐 추가했다가 제거.
+  // CSS animation 은 class 가 적용된 동안만 작동, 끝나면 멈춤.
+  function triggerBellSwing(){
+    if(style !== 'bell') return;
+    var bw = document.getElementById('bw');
+    if(!bw) return;
+    bw.classList.remove('swing');
+    // reflow 강제 — class 재추가 시 애니메이션 다시 시작
+    void bw.offsetWidth;
+    bw.classList.add('swing');
   }
   root.addEventListener('click', function(){
     if(window.popupAPI && window.popupAPI.bubbleClicked) window.popupAPI.bubbleClicked();
   });
   if(window.popupAPI && window.popupAPI.onBubbleUpdate){
     window.popupAPI.onBubbleUpdate(function(d){
+      var newCount = (d && typeof d.count === 'number') ? d.count : count;
+      var styleChanged = (d && typeof d.style === 'string' && d.style !== style);
+      var countIncreased = newCount > count;
       if(d && typeof d.style === 'string') style = d.style;
-      if(d && typeof d.count === 'number') count = d.count;
+      if(d && typeof d.count === 'number') count = newCount;
       render();
+      // 새 질문 도착 (count 증가) 또는 스타일 변경 시 종 한 번 흔들림
+      if(countIncreased || styleChanged) {
+        requestAnimationFrame(triggerBellSwing);
+      }
     });
   }
   render();
+  // 최초 등장 시에도 종 한 번 흔들림
+  requestAnimationFrame(triggerBellSwing);
 </script>
 </body></html>`
 }
@@ -607,7 +606,9 @@ function createTransparentPopupWindow(w, h, x, y) {
   const win = new BrowserWindow({
     width: w, height: h, x, y,
     frame: false, transparent: true, backgroundColor: '#00000000',
-    alwaysOnTop: true, hasShadow: true,
+    alwaysOnTop: true,
+    hasShadow: false,        // macOS 기본 윈도우 그림자/회색 테두리 제거
+    roundedCorners: false,   // macOS frameless 디폴트 둥근 테두리 제거 (회색 outline 의 원인)
     resizable: true, minimizable: false, maximizable: false, skipTaskbar: true,
     focusable: false, show: false,
     webPreferences: {
