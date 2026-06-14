@@ -288,10 +288,12 @@ ipcMain.on('set-live-size', (_, payload) => {
 // ── popup_only 모드 ─────────────────────────────────────────────────────────
 // 미니 모드와 같은 패턴 — 별도 BrowserWindow 안 만들고 같은 위젯창의 콘텐츠/사이즈만 바꿈.
 // 사이즈는 렌더러가 setPopupSize(w,h) IPC 로 명시. 우측 끝 anchor 유지.
-const POPUP_TINY_W = 56
-const POPUP_TINY_H = 28
+// 세로 폭은 항상 MINI_H (52). 가로만 변동.
+const POPUP_TINY_W = 52
+const POPUP_TINY_H = 52
 let popupModeActive = false
 let savedWidgetBounds = null
+let pendingResizeAnim = null
 
 function clampToDisplay(x, y, w, h, refBounds) {
   const display = screen.getDisplayMatching(refBounds || { x, y, width: w, height: h }).workArea
@@ -300,16 +302,50 @@ function clampToDisplay(x, y, w, h, refBounds) {
   return { x: nx, y: ny, width: w, height: h }
 }
 
-function setWidgetSizeAnchorRight(w, h) {
+// 윈도우 bounds 를 target 으로 부드럽게 보간 — popup 모드 내 상태 전환용.
+// 매 frame setBounds 호출. ease-out cubic. 180ms 정도가 자연스러움.
+function animateWidgetBoundsTo(target, durationMs = 180) {
+  if (!widgetWindow || widgetWindow.isDestroyed()) return
+  if (pendingResizeAnim) { clearTimeout(pendingResizeAnim); pendingResizeAnim = null }
+  const start = widgetWindow.getBounds()
+  // 시작 = target 이면 패스
+  if (start.x === target.x && start.y === target.y &&
+      start.width === target.width && start.height === target.height) return
+  const startTime = Date.now()
+  const step = () => {
+    pendingResizeAnim = null
+    if (!widgetWindow || widgetWindow.isDestroyed()) return
+    if (widgetClosing) return
+    const elapsed = Date.now() - startTime
+    const t = Math.min(1, elapsed / durationMs)
+    const eased = 1 - Math.pow(1 - t, 3)
+    const cur = {
+      x: Math.round(start.x + (target.x - start.x) * eased),
+      y: Math.round(start.y + (target.y - start.y) * eased),
+      width: Math.round(start.width + (target.width - start.width) * eased),
+      height: Math.round(start.height + (target.height - start.height) * eased),
+    }
+    try { widgetWindow.setBounds(cur) } catch {}
+    if (t < 1) pendingResizeAnim = setTimeout(step, 16)
+  }
+  step()
+}
+
+function setWidgetSizeAnchorRight(w, h, animate = false) {
   if (!widgetWindow || widgetWindow.isDestroyed()) return
   if (widgetClosing) return
   const cur = widgetWindow.getBounds()
   const right = cur.x + cur.width
-  const bounds = clampToDisplay(right - w, cur.y, w, h, cur)
+  const target = clampToDisplay(right - w, cur.y, w, h, cur)
   widgetWindow.setResizable(true)
   widgetWindow.setMinimumSize(0, 0)
   widgetWindow.setMaximumSize(0, 0)
-  widgetWindow.setBounds(bounds)
+  if (animate) {
+    animateWidgetBoundsTo(target, 180)
+  } else {
+    if (pendingResizeAnim) { clearTimeout(pendingResizeAnim); pendingResizeAnim = null }
+    widgetWindow.setBounds(target)
+  }
 }
 
 ipcMain.on('enter-popup-mode', () => {
@@ -318,7 +354,7 @@ ipcMain.on('enter-popup-mode', () => {
   if (popupModeActive) return
   popupModeActive = true
   savedWidgetBounds = widgetWindow.getBounds()
-  setWidgetSizeAnchorRight(POPUP_TINY_W, POPUP_TINY_H)
+  setWidgetSizeAnchorRight(POPUP_TINY_W, POPUP_TINY_H, false)   // 큰 점프 — 즉시
 })
 
 ipcMain.on('exit-popup-mode', () => {
@@ -327,17 +363,17 @@ ipcMain.on('exit-popup-mode', () => {
   popupModeActive = false
   const targetW = savedWidgetBounds?.width || MINI_W
   const targetH = savedWidgetBounds?.height || LIVE_TEMP_HEIGHT
-  setWidgetSizeAnchorRight(targetW, targetH)
+  setWidgetSizeAnchorRight(targetW, targetH, false)             // 큰 점프 — 즉시
   savedWidgetBounds = null
 })
 
-// 렌더러가 콘텐츠 상태 (tiny / bubble / expanded) 변경 시 호출
+// 렌더러가 콘텐츠 상태 (tiny / bubble / expanded) 변경 시 호출 — 부드럽게 보간
 ipcMain.on('set-popup-size', (_, payload) => {
   if (!popupModeActive) return
   if (!payload) return
   const w = Math.max(40, Math.min(720, Math.round(Number(payload.w) || 0)))
   const h = Math.max(28, Math.min(720, Math.round(Number(payload.h) || 0)))
-  setWidgetSizeAnchorRight(w, h)
+  setWidgetSizeAnchorRight(w, h, true)
 })
 
 // ── 강의 목록 백업 (localStorage 손실 시 복구용) ──────────────────────────
