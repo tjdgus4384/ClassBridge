@@ -21,9 +21,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 강의 목록 백업 — userData/courses.json
   readCoursesBackup: () => ipcRenderer.invoke('read-courses-backup'),
   writeCoursesBackup: (data) => ipcRenderer.invoke('write-courses-backup', data),
-  // ── popup_only 모드 — 위젯창 자체를 작은 복귀 버튼으로 축소, 질문은 단일 풍선창으로 ──
+  // ── popup_only 모드 — 같은 위젯창 안에서 콘텐츠 + 사이즈만 변경 (미니 모드 패턴) ──
   enterPopupMode: () => ipcRenderer.send('enter-popup-mode'),
   exitPopupMode: () => ipcRenderer.send('exit-popup-mode'),
-  showQuestionPopup: (text, qid) => ipcRenderer.send('show-question-popup', { text, qid }),
+  // 렌더러가 tiny / bubble / expanded 상태 전환 시 호출
+  setPopupSize: (w, h) => ipcRenderer.send('set-popup-size', { w, h }),
   isElectron: true,
 })

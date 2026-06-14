@@ -24,10 +24,10 @@ declare global {
       flushSessionDone?: () => void
       readCoursesBackup?: () => Promise<StoredCourse[] | null>
       writeCoursesBackup?: (data: StoredCourse[]) => Promise<boolean>
-      // popup_only 모드 — 위젯 축소 / 단일 질문 풍선창 (bubble ↔ expanded)
+      // popup_only 모드 — 같은 위젯창 안 콘텐츠/사이즈 변경 (미니 모드 패턴)
       enterPopupMode?: () => void
       exitPopupMode?: () => void
-      showQuestionPopup?: (text: string, qid: string) => void
+      setPopupSize?: (w: number, h: number) => void
       isElectron: boolean
     }
   }

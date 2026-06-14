@@ -86,10 +86,13 @@ export default function ProfessorDashboard() {
 
   // compact 초기값: ?compact=1 로 직접 접속할 때만 true, 기본은 큰 모드
   const [compact, setCompact] = useState(false)
-  // popup_only 모드: 라이브 중 위젯창을 작은 복귀 버튼으로 축소, 질문은 별도 풍선창으로.
-  // 강의별 localStorage 영속. Electron 전용.
+  // popup_only 모드: 라이브 중 위젯창이 작은 pill 로 축소됨. 같은 위젯창 안에서
+  // 콘텐츠/사이즈만 변경 (미니 모드 패턴). Electron 전용. 강의별 localStorage 영속.
   type WidgetMode = 'full' | 'popup_only'
   const [widgetMode, setWidgetMode] = useState<WidgetMode>('full')
+  // popup_only 의 질문 큐 (도착 순). 화면 표시는 가장 오래된 것 우선.
+  const [popupQueue, setPopupQueue] = useState<Question[]>([])
+  const [popupExpanded, setPopupExpanded] = useState(false)
   const [baseUrl, setBaseUrl] = useState('')
   const ownerTokenRef = useRef<string | null>(null)
   const contentRef = useRef<HTMLDivElement | null>(null)
@@ -122,18 +125,35 @@ export default function ProfessorDashboard() {
     }
   }, [roomId])
 
+  // popup_only 상태별 widget 창 사이즈 — 미니 모드처럼 명시적 픽셀 값
+  const POPUP_TINY = { w: 80, h: 32 }
+  const POPUP_BUBBLE = { w: 124, h: 32 }
+  const POPUP_EXPANDED = { w: 320, h: 130 }
+
   // 모드 변경 — localStorage 저장 + Electron 메인 동기화.
-  // 라이브 중에 popup_only 진입 → 위젯 축소 IPC. full 복귀 → 위젯 복원 IPC.
-  // 라이브 아닐 때 모드 바꿔도 위젯 사이즈는 그대로 (라이브 진입 시점에 적용).
   const changeWidgetMode = useCallback((mode: WidgetMode) => {
     setWidgetMode(mode)
     if (typeof roomId === 'string') {
       try { localStorage.setItem(`cb-widget-mode:${roomId}`, mode) } catch {}
     }
+    if (mode === 'full') {
+      // 모드 변경 시 큐/expanded 초기화 (전체 보기로 돌아가면 질문은 풀 패널에서 확인)
+      setPopupQueue([])
+      setPopupExpanded(false)
+    }
   }, [roomId])
 
+  // popup queue 의 가장 오래된 질문 dismiss (확인/다음)
+  const advancePopupQueue = useCallback(() => {
+    setPopupQueue((prev) => {
+      const next = prev.slice(1)
+      if (next.length === 0) setPopupExpanded(false)
+      return next
+    })
+  }, [])
+
   // widgetMode × isLive 조합 변경 시 Electron 위젯 사이즈 동기화.
-  // 라이브 중 popup_only → enterPopupMode, 그 외 (full 복귀 또는 세션 종료) → exitPopupMode.
+  // 라이브 + popup_only → enterPopupMode (tiny), 그 외 (full 복귀 또는 세션 종료) → exitPopupMode.
   useEffect(() => {
     if (!isElectron) return
     const api = window.electronAPI
@@ -144,6 +164,31 @@ export default function ProfessorDashboard() {
       api.exitPopupMode?.()
     }
   }, [isElectron, widgetMode, isLive])
+
+  // popup_only 안에서 상태별 (tiny / bubble / expanded) 사이즈 조정 — setPopupSize IPC.
+  useEffect(() => {
+    if (!isElectron) return
+    if (!(widgetMode === 'popup_only' && isLive)) return
+    const api = window.electronAPI
+    if (!api?.setPopupSize) return
+    if (popupExpanded && popupQueue.length > 0) {
+      api.setPopupSize(POPUP_EXPANDED.w, POPUP_EXPANDED.h)
+    } else if (popupQueue.length > 0) {
+      api.setPopupSize(POPUP_BUBBLE.w, POPUP_BUBBLE.h)
+    } else {
+      api.setPopupSize(POPUP_TINY.w, POPUP_TINY.h)
+    }
+    // size 객체들은 stable 한 상수라 의존성에서 제외 (eslint-disable 불필요)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isElectron, widgetMode, isLive, popupExpanded, popupQueue.length])
+
+  // 세션 종료 / 모드 변경 / 라이브 끝 시 큐 정리
+  useEffect(() => {
+    if (!(widgetMode === 'popup_only' && isLive)) {
+      setPopupQueue([])
+      setPopupExpanded(false)
+    }
+  }, [widgetMode, isLive])
 
   // 위젯 모드면 body를 투명하게 — Electron transparent: true와 같이 동작.
   // 콘텐츠 컨테이너에 CSS bg-* 처리. 미니 모드만 비침, 풀/검토는 거의 불투명.
@@ -233,10 +278,14 @@ export default function ProfessorDashboard() {
     const onNewQuestion = (data: { question: Question; questionCount: number }) => {
       // 최신이 위 — prepend
       setQuestions((prev) => [data.question, ...prev])
-      // popup_only 모드 + Electron: 별도 풍선 창으로 띄움 (위젯 자체는 축소된 상태).
-      if (widgetMode === 'popup_only' && isLive && isElectron) {
-        try { window.electronAPI?.showQuestionPopup?.(data.question.text, data.question.id) } catch {}
-        // unread 뱃지/pulse 는 무관 — 본문이 안 보이는 화면이라 무의미.
+      // popup_only 모드 + 라이브: 같은 위젯창의 queue 에 push. 위젯이 자동으로
+      // tiny → bubble 사이즈로 확장 (size useEffect 가 처리).
+      if (widgetMode === 'popup_only' && isLive) {
+        setPopupQueue((prev) => {
+          if (prev.some(q => q.id === data.question.id)) return prev
+          if (prev.length >= 30) return [...prev.slice(1), data.question]
+          return [...prev, data.question]
+        })
         return
       }
       // "실제로 화면에 보이는가" = 풀 모드 + 패널 open. 미니거나 패널 닫혀있으면 안 보이는 것과 동일.
@@ -500,21 +549,110 @@ export default function ProfessorDashboard() {
     if (studentUrl) navigator.clipboard.writeText(studentUrl)
   }
 
-  // ── popup_only + 라이브: 위젯창은 40×40 작은 복귀 버튼만. 본문 일체 없음. ──
-  // 창 크기 = 버튼 크기 (이중 박스로 안 보이도록). 솔리드 다크, border 없음.
+  // ── popup_only + 라이브: 미니 모드 패턴 — 같은 위젯창 안에 콘텐츠.
+  // 상태별 사이즈는 setPopupSize useEffect 가 처리.
+  //   tiny (80×32)     : 드래그 핸들 + 복귀 버튼
+  //   bubble (124×32)  : 드래그 + 💬+카운트 + 복귀
+  //   expanded (320×130): 드래그 헤더 + 카드본문 + "다음/확인" + 작은 복귀
+  // 전체 컨테이너에 WebkitAppRegion: drag, 버튼만 no-drag — 어디든 잡아서 이동 가능.
   if (isLive && widgetMode === 'popup_only' && isElectron) {
+    const count = popupQueue.length
+    const current = popupQueue[0]
+    const showBubble = count > 0 && !popupExpanded
+    const showExpanded = count > 0 && popupExpanded
+
     return (
       <>
         <Head><title>ClassBridge</title></Head>
-        <button
-          onClick={() => changeWidgetMode('full')}
-          className="fixed inset-0 w-screen h-screen rounded-full bg-[#0a0a0a] hover:bg-[#1a1a1a] text-white/65 hover:text-white transition-colors flex items-center justify-center select-none"
-          title="전체 보기로 복귀"
+        <div
+          className="w-screen h-screen bg-[#0a0a0a] text-white select-none flex"
+          style={{
+            WebkitAppRegion: 'drag',
+            borderRadius: showExpanded ? 14 : 10,
+            overflow: 'hidden',
+            alignItems: showExpanded ? 'stretch' : 'center',
+          } as React.CSSProperties}
         >
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2.2} viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4" />
-          </svg>
-        </button>
+          {showExpanded && current ? (
+            // ── expanded: 카드 본문 + 확인/다음 ──
+            <div className="flex-1 flex flex-col px-3.5 py-2.5">
+              <div className="flex items-center justify-between mb-1.5">
+                <div className="flex items-center gap-1.5 text-[11px] text-white/45 font-semibold tracking-wide">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                  <span>{count > 1 ? `질문 1 / ${count}` : '질문'}</span>
+                </div>
+                <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+                  <button
+                    onClick={() => setPopupExpanded(false)}
+                    className="text-white/45 hover:text-white/80 w-6 h-6 rounded-md hover:bg-white/8 text-sm flex items-center justify-center"
+                    title="접기"
+                  >▾</button>
+                  <button
+                    onClick={() => changeWidgetMode('full')}
+                    className="text-white/45 hover:text-white/80 w-6 h-6 rounded-md hover:bg-white/8 flex items-center justify-center"
+                    title="전체 보기로 복귀"
+                  >
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.4} viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <div
+                className="flex-1 text-white text-[14px] font-medium leading-snug overflow-hidden"
+                style={{ display: '-webkit-box', WebkitLineClamp: 3, WebkitBoxOrient: 'vertical' } as React.CSSProperties}
+              >
+                {current.text}
+              </div>
+              <div className="flex justify-end mt-2" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+                <button
+                  onClick={advancePopupQueue}
+                  className="bg-white text-black hover:bg-white/90 text-xs font-semibold px-3.5 py-1.5 rounded-md transition-colors"
+                >
+                  {count > 1 ? '다음' : '확인'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            // ── tiny / bubble: 드래그 핸들 + (💬) + 복귀 버튼 ──
+            <>
+              {/* 좌측 드래그 핸들 — 작은 dot 3개 (미니 모드의 ⠿ 와 유사) */}
+              <div className="flex items-center gap-0.5 pl-3 pr-2 h-full">
+                <span className="w-0.5 h-0.5 rounded-full bg-white/30" />
+                <span className="w-0.5 h-0.5 rounded-full bg-white/30" />
+                <span className="w-0.5 h-0.5 rounded-full bg-white/30" />
+              </div>
+              {/* 가운데 질문 버블 — 큐에 질문 있을 때만 */}
+              {showBubble && (
+                <button
+                  onClick={() => setPopupExpanded(true)}
+                  className="relative flex items-center justify-center w-7 h-7 rounded-full bg-emerald-400/15 hover:bg-emerald-400/25 transition-colors text-base"
+                  style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+                  title="질문 보기"
+                >
+                  <span aria-hidden>💬</span>
+                  {count > 1 && (
+                    <span className="absolute -top-1 -right-1 bg-rose-500 text-white text-[9px] font-bold rounded-full min-w-[15px] h-[15px] flex items-center justify-center px-1 leading-none border border-[#0a0a0a]">
+                      {count > 99 ? '99+' : count}
+                    </span>
+                  )}
+                </button>
+              )}
+              {/* 우측 채우기 + 복귀 버튼 */}
+              <div className="flex-1" />
+              <button
+                onClick={() => changeWidgetMode('full')}
+                className="flex items-center justify-center w-9 h-full text-white/55 hover:text-white hover:bg-white/8 transition-colors"
+                style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+                title="전체 보기로 복귀"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.2} viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4" />
+                </svg>
+              </button>
+            </>
+          )}
+        </div>
       </>
     )
   }

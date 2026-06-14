@@ -24,7 +24,6 @@
     "files": [
       "main.js",
       "preload.js",
-      "popup-preload.js",
       "package.json"
     ],
     "mac": {
