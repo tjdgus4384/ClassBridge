@@ -123,7 +123,8 @@ function createWidgetWindow(roomId, ownerToken) {
     transparent: true,                  // 미니 모드 비침용 (풀/검토는 CSS 거의 불투명)
     backgroundColor: '#00000000',
     alwaysOnTop: true,
-    hasShadow: true,
+    hasShadow: false,                   // macOS 의 시스템 그림자가 흰빛 halo 로 비쳐 이중 박스처럼 보이는 문제 해소
+    roundedCorners: false,              // macOS 디폴트 둥근 모서리 outline 제거 — CSS borderRadius 가 처리
     resizable: true,
     minimizable: false,
     maximizable: false,
@@ -328,15 +329,22 @@ function setWidgetSizeAnchorRight(w, h) {
   widgetWindow.setBounds(target)
 }
 
-// 말풍선/카드 위치 — 위젯 왼쪽 옆 (우측 끝 = 위젯.x - GAP), 상단 정렬.
-function popupPositionLeftOfWidget(w, h) {
+// 말풍선/카드 위치 — 위젯 왼쪽 옆 (우측 끝 = 위젯.x - GAP).
+// verticalAlign 'center' (말풍선): 콘텐츠가 위젯 세로 중심선에 오게.
+// verticalAlign 'top' (카드): 위젯 상단과 같은 y.
+function popupPositionLeftOfWidget(w, h, verticalAlign = 'center') {
   const widgetBounds = (widgetWindow && !widgetWindow.isDestroyed())
     ? widgetWindow.getBounds()
     : null
   let x, y
   if (widgetBounds) {
     x = widgetBounds.x - w - POPUP_GAP
-    y = widgetBounds.y
+    if (verticalAlign === 'top') {
+      y = widgetBounds.y
+    } else {
+      // center — 콘텐츠 중심을 위젯 중심에 맞춤
+      y = widgetBounds.y + Math.round((widgetBounds.height - h) / 2)
+    }
   } else {
     const d = screen.getPrimaryDisplay().workArea
     x = d.x + d.width - w - 60
@@ -349,12 +357,12 @@ function popupPositionLeftOfWidget(w, h) {
 function reattachPopupWindowsToWidget() {
   if (popupBubbleWindow && !popupBubbleWindow.isDestroyed()) {
     const b = popupBubbleWindow.getBounds()
-    const bounds = popupPositionLeftOfWidget(b.width, b.height)
+    const bounds = popupPositionLeftOfWidget(b.width, b.height, 'center')
     try { popupBubbleWindow.setBounds(bounds) } catch {}
   }
   if (popupCardWindow && !popupCardWindow.isDestroyed()) {
     const b = popupCardWindow.getBounds()
-    const bounds = popupPositionLeftOfWidget(b.width, b.height)
+    const bounds = popupPositionLeftOfWidget(b.width, b.height, 'top')
     try { popupCardWindow.setBounds(bounds) } catch {}
   }
 }
@@ -627,7 +635,7 @@ function ensurePopupBubbleWindow(style, count) {
   if (popupBubbleWindow && !popupBubbleWindow.isDestroyed()) {
     // 사이즈만 갱신 (스타일 변경 시 사이즈도 달라짐)
     const dim = BUBBLE_DIMENSIONS[style] || BUBBLE_DIMENSIONS.balloon
-    const bounds = popupPositionLeftOfWidget(dim.w, dim.h)
+    const bounds = popupPositionLeftOfWidget(dim.w, dim.h, 'center')
     try { popupBubbleWindow.setBounds(bounds) } catch {}
     popupBubbleWindow.webContents.send('popup-bubble-update', { style, count })
     return popupBubbleWindow
@@ -647,7 +655,7 @@ function ensurePopupCardWindow(text, currentIdx, total) {
     popupCardWindow.webContents.send('popup-card-update', { text, currentIdx, total })
     return popupCardWindow
   }
-  const bounds = popupPositionLeftOfWidget(CARD_W, CARD_DEFAULT_H)
+  const bounds = popupPositionLeftOfWidget(CARD_W, CARD_DEFAULT_H, 'top')
   const win = createTransparentPopupWindow(bounds.width, bounds.height, bounds.x, bounds.y)
   popupCardWindow = win
   win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(makeCardHtml(text, currentIdx, total)))
@@ -704,7 +712,7 @@ ipcMain.on('popup-card-action', () => {
 ipcMain.on('popup-card-resize', (_, payload) => {
   if (!popupCardWindow || popupCardWindow.isDestroyed()) return
   const h = Math.max(60, Math.min(CARD_MAX_H, Math.round(Number(payload && payload.h) || 0)))
-  const bounds = popupPositionLeftOfWidget(CARD_W, h)
+  const bounds = popupPositionLeftOfWidget(CARD_W, h, 'top')
   try { popupCardWindow.setBounds(bounds) } catch {}
 })
 
