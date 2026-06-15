@@ -142,14 +142,17 @@ export default function ProfessorDashboard() {
   }, [roomId])
 
   // 미니 모드의 💬 클릭 → popup 카드 띄움 (위젯 확장 X).
-  // 큐를 현재 questions 로 채우고 첫 질문부터 cycle.
+  // popup_only 처럼 아직 확인하지 않은 새 질문만 oldest first 로 cycle.
   const openMiniPopupCard = useCallback(() => {
-    if (questions.length === 0) return
-    setUnreadIds(new Set())
-    setPopupQueue([...questions].reverse())  // oldest first
+    if (unreadIds.size === 0) return
+    const unreadQuestions = [...questions]
+      .reverse()
+      .filter((q) => unreadIds.has(q.id))
+    if (unreadQuestions.length === 0) return
+    setPopupQueue(unreadQuestions)
     setPopupCardIdx(0)
     setPopupCardOpen(true)
-  }, [questions])
+  }, [questions, unreadIds])
 
   // widgetMode × isLive 조합 변경 시 Electron 위젯 모드 진입/탈출.
   useEffect(() => {
@@ -216,6 +219,12 @@ export default function ProfessorDashboard() {
           if (isLast) {
             // 확인 → 카드 닫고 큐 비움
             setPopupCardOpen(false)
+            setUnreadIds((prevUnread) => {
+              if (prevUnread.size === 0) return prevUnread
+              const next = new Set(prevUnread)
+              popupQueue.forEach((q) => next.delete(q.id))
+              return next
+            })
             setPopupQueue([])
             return 0
           }
@@ -227,7 +236,7 @@ export default function ProfessorDashboard() {
       }
     })
     return () => { try { off?.() } catch {} }
-  }, [isElectron, popupQueue.length, changeWidgetMode])
+  }, [isElectron, popupQueue, changeWidgetMode])
 
   // 위젯 모드면 body를 투명하게 — Electron transparent: true와 같이 동작.
   // 콘텐츠 컨테이너에 CSS bg-* 처리. 미니 모드만 비침, 풀/검토는 거의 불투명.
@@ -656,7 +665,7 @@ export default function ProfessorDashboard() {
               <button
                 onClick={openMiniPopupCard}
                 className={`relative flex items-center justify-center w-7 h-7 rounded-full transition-colors
-                  ${questions.length > 0 ? 'text-white/70 hover:text-white' : 'text-white/25 hover:text-white/50'}
+                  ${unreadIds.size > 0 ? 'text-white/70 hover:text-white' : 'text-white/25 hover:text-white/50'}
                   ${newQuestionPulse ? 'animate-bounce' : ''}`}
                 style={{ WebkitAppRegion: 'no-drag' } as any}
                 title="질문 보기"
@@ -665,14 +674,10 @@ export default function ProfessorDashboard() {
                   <path strokeLinecap="round" strokeLinejoin="round"
                     d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
                 </svg>
-                {/* 미니 뱃지: unread 있으면 빨강, 없으면 회색으로 총 개수 (질문 있을 때만) */}
+                {/* 미니 뱃지: 새로 온 질문만 표시 */}
                 {unreadIds.size > 0 ? (
                   <span className="absolute -top-1 -right-1 bg-rose-500 text-white text-[9px] font-bold rounded-full min-w-[16px] h-4 flex items-center justify-center px-1 leading-none">
                     {unreadIds.size > 9 ? '9+' : unreadIds.size}
-                  </span>
-                ) : questions.length > 0 ? (
-                  <span className="absolute -top-1 -right-1 bg-white/20 text-white/70 text-[9px] font-bold rounded-full min-w-[16px] h-4 flex items-center justify-center px-1 leading-none">
-                    {questions.length > 9 ? '9+' : questions.length}
                   </span>
                 ) : null}
               </button>

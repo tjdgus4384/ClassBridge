@@ -306,7 +306,12 @@ ipcMain.on('set-live-size', (_, payload) => {
 const POPUP_TINY_W = 72
 const POPUP_TINY_H = 72
 const POPUP_GAP = 8                 // 위젯 ↔ 말풍선/카드 간 간격
+const POPUP_BUTTON_SIZE = 36
+const POPUP_BUBBLE_SIZE = 36
+const POPUP_BUBBLE_VISUAL_GAP = 18  // 질문 도착 말풍선 원 ↔ 복귀 버튼 원 간 보이는 간격
+const POPUP_CARD_VISUAL_GAP = 18    // 질문 카드 흰 면 ↔ 복귀 버튼 원 간 보이는 간격
 const CARD_W = 312                  // 본문 280 + 양옆 16px 그림자 buffer
+const CARD_SHADOW_PAD_X = 16
 const CARD_DEFAULT_H = 110          // 카드 처음 등장 시 임시 높이 — ResizeObserver 가 조정
 const CARD_MAX_H = 320
 const BUBBLE_W = 72                 // 말풍선 (흰 원 + Sea Blue 배지) — 콘텐츠 36 + 그림자 buffer 18×2
@@ -376,7 +381,9 @@ function setWidgetSizeAnchorRight(w, h) {
 function popupPositionForCard(w, h) {
   if (popupReturnWindow && !popupReturnWindow.isDestroyed()) {
     const r = popupReturnWindow.getBounds()
-    return clampToDisplay(r.x - w - POPUP_GAP, r.y, w, h, r)
+    const returnButtonLeft = r.x + Math.round((r.width - POPUP_BUTTON_SIZE) / 2)
+    const cardVisibleRightOffset = w - CARD_SHADOW_PAD_X
+    return clampToDisplay(returnButtonLeft - POPUP_CARD_VISUAL_GAP - cardVisibleRightOffset, r.y, w, h, r)
   }
   if (widgetWindow && !widgetWindow.isDestroyed()) {
     const wb = widgetWindow.getBounds()
@@ -399,7 +406,13 @@ function popupPositionLeftOfWidget(w, h, verticalAlign = 'center') {
   const refBounds = anchor ? anchor.getBounds() : null
   let x, y
   if (refBounds) {
-    x = refBounds.x - w - POPUP_GAP
+    if (anchor === popupReturnWindow) {
+      const returnButtonLeft = refBounds.x + Math.round((refBounds.width - POPUP_BUTTON_SIZE) / 2)
+      const bubbleCircleRightOffset = Math.round((w + POPUP_BUBBLE_SIZE) / 2)
+      x = returnButtonLeft - POPUP_BUBBLE_VISUAL_GAP - bubbleCircleRightOffset
+    } else {
+      x = refBounds.x - w - POPUP_GAP
+    }
     y = verticalAlign === 'top'
       ? refBounds.y
       : refBounds.y + Math.round((refBounds.height - h) / 2)
